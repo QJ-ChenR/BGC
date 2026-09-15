@@ -6,13 +6,15 @@
 自定义路径：python script/extract_core_gene.py --input-dir PATH --output-dir PATH
 
 输出 core_genes.faa（已有蛋白翻译）、core_genes.fna（CDS 核酸）和
-core_genes.tsv（注释）。跳过没有 core 标签的条目；每次运行覆盖同名输出。
+core_genes.tsv（注释），以及 no_core_files.tsv（无 core 标签的人工核查清单）。
+跳过没有 core 标签的条目；每次运行覆盖同名输出。
 TSV 的 start/end 是 1-based、两端包含的范围；location_0based 保留
 Biopython 的完整位置表示（0-based、右端不包含），包括分段和模糊边界。
 """
 
 import argparse
 import csv
+from collections import Counter
 from pathlib import Path
 
 try:
@@ -28,6 +30,11 @@ FIELDS = [
     "sequence_id", "bgc_id", "record_id", "gene_index", "gene", "locus_tag",
     "protein_id", "start", "end", "strand", "location_0based", "gene_kind",
     "product", "gene_functions", "nt_length", "aa_length", "source_file",
+]
+NO_CORE_FIELDS = [
+    "bgc_id", "source_file", "record_ids", "organism", "description",
+    "mibig_labels", "total_cds", "additional_cds", "unlabeled_cds",
+    "gene_kind_counts", "reason", "source_path",
 ]
 
 
@@ -45,21 +52,42 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
         (output_dir / "core_genes.faa").open("w", encoding="utf-8") as proteins,
         (output_dir / "core_genes.fna").open("w", encoding="utf-8") as nucleotides,
         (output_dir / "core_genes.tsv").open("w", encoding="utf-8", newline="") as table,
+        (output_dir / "no_core_files.tsv").open("w", encoding="utf-8", newline="") as no_core_table,
     ):
         writer = csv.DictWriter(table, fieldnames=FIELDS, delimiter="\t")
         writer.writeheader()
+        no_core_writer = csv.DictWriter(no_core_table, fieldnames=NO_CORE_FIELDS, delimiter="\t")
+        no_core_writer.writeheader()
 
         for gbk_file in gbk_files:
             bgc_id = gbk_file.stem
             gene_index = 0
             file_core_count = 0
+            record_ids = []
+            organisms = set()
+            descriptions = set()
+            mibig_labels = set()
+            kind_counts = Counter()
+            unlabeled_cds = 0
             with gbk_file.open(encoding="utf-8") as source:
                 for record in SeqIO.parse(source, "genbank"):
+                    record_ids.append(record.id)
+                    if record.annotations.get("organism"):
+                        organisms.add(record.annotations["organism"])
+                    if record.description:
+                        descriptions.add(record.description)
                     for feature in record.features:
+                        if (feature.type == "subregion"
+                                and "mibig" in feature.qualifiers.get("aStool", [])):
+                            mibig_labels.update(feature.qualifiers.get("label", []))
                         if feature.type != "CDS":
                             continue
                         gene_index += 1
                         qualifiers = feature.qualifiers
+                        kinds = {kind for kind in qualifiers.get("gene_kind", []) if kind}
+                        kind_counts.update(kinds)
+                        if not kinds:
+                            unlabeled_cds += 1
                         if "biosynthetic" not in qualifiers.get("gene_kind", []):
                             continue
                         if feature.location is None:
@@ -112,6 +140,23 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
             counts["core_genes"] += file_core_count
             if file_core_count:
                 counts["files_with_core"] += 1
+            else:
+                no_core_writer.writerow({
+                    "bgc_id": bgc_id,
+                    "source_file": gbk_file.name,
+                    "record_ids": " | ".join(record_ids),
+                    "organism": " | ".join(sorted(organisms)),
+                    "description": " | ".join(sorted(descriptions)),
+                    "mibig_labels": " | ".join(sorted(mibig_labels)),
+                    "total_cds": gene_index,
+                    "additional_cds": kind_counts["biosynthetic-additional"],
+                    "unlabeled_cds": unlabeled_cds,
+                    "gene_kind_counts": " | ".join(
+                        f"{kind}:{count}" for kind, count in sorted(kind_counts.items())
+                    ),
+                    "reason": "no_biosynthetic_label",
+                    "source_path": str(gbk_file.resolve()),
+                })
 
     return counts
 
@@ -137,6 +182,7 @@ def main() -> None:
     print(f"提取 core CDS：{counts['core_genes']}")
     print(f"缺少 translation 的 core CDS：{counts['missing_translation']}（仅输出核酸和注释）")
     print(f"输出目录：{args.output_dir.resolve()}")
+    print(f"无 core 标签的人工核查清单：{(args.output_dir / 'no_core_files.tsv').resolve()}")
 
 
 if __name__ == "__main__":
