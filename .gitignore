@@ -1,0 +1,19 @@
+# Downloaded data and generated artifacts
+/data/
+
+# Local environments and Python caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local tool configuration and credentials
+.agents/
+.codex/
+.env
+.env.*
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
