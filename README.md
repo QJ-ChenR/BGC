@@ -60,6 +60,7 @@ Results are written to `data/processed/core_genes/` by default:
 | `core_genes.faa` | Protein sequences from existing CDS translation annotations |
 | `core_genes.fna` | CDS nucleotide sequences in coding orientation, supporting reverse strands and joined locations |
 | `core_genes.tsv` | BGC and gene identifiers, coordinates, functional annotations, and sequence lengths |
+| `no_core_files.tsv` | One row per input file without a core-labeled CDS, for manual review |
 
 FASTA identifiers use the format `BGC_ID|CDS_index|gene_identifier`.
 The CDS index is 1-based within each input file and counts all CDS features,
@@ -76,6 +77,38 @@ including strand, joined segments, and fuzzy boundaries, using 0-based,
 end-exclusive coordinates.
 
 Rerunning the script overwrites files with the same names in the output directory.
+
+### Reviewing files without core labels
+
+`no_core_files.tsv` lists every skipped file, with its BGC ID, filename, record
+IDs, organism, description, MIBiG subregion labels, and absolute source path.
+It also reports the total CDS count, the number labeled
+`biosynthetic-additional`, the number without a `gene_kind` value, and counts
+for each observed `gene_kind` value. Missing MIBiG labels are left blank;
+labels are taken from `subregion` features with `aStool="mibig"`.
+
+The reason `no_biosynthetic_label` means that no CDS passed the exact core-label
+filter. These files need manual review against their gene annotations and
+supporting evidence before deciding which genes to include. Additional or
+unlabeled CDS features are not automatically promoted to core genes.
+Keep review decisions in a separate copy or table, since this inventory is
+regenerated on each extraction run.
+
+## Core gene statistics
+
+After extraction, summarize the sequence count, mean length, and maximum length:
+
+```bash
+python script/core_gene_stats.py
+```
+
+Use `--input-dir /path/to/output` if the extraction results are stored elsewhere.
+The script reads `core_genes.fna` and `core_genes.faa` and prints separate
+statistics for CDS nucleotides (bp) and proteins (aa), including the identifiers
+of all sequences tied for maximum length. Each FASTA record counts once; no
+deduplication is performed. Lengths count sequence symbols, including any stop
+symbols present in protein annotations. Empty files report a count of zero and
+`N/A` lengths. Protein counts may be lower if some CDS translations are missing.
 
 ## Validation
 
