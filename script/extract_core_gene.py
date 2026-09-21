@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""提取 MIBiG GBK 中 gene_kind 精确为 biosynthetic 的 CDS。
+"""Extract CDS features with an exact gene_kind value of biosynthetic from MIBiG GBK files.
 
-依赖：python -m pip install biopython
-运行：python script/extract_core_gene.py
-自定义路径：python script/extract_core_gene.py --input-dir PATH --output-dir PATH
+Dependency: python -m pip install biopython
+Usage: python script/extract_core_gene.py
+Custom paths: python script/extract_core_gene.py --input-dir PATH --output-dir PATH
 
-输出 core_genes.faa（已有蛋白翻译）、core_genes.fna（CDS 核酸）和
-core_genes.tsv（注释），以及 no_core_files.tsv（无 core 标签的人工核查清单）。
-跳过没有 core 标签的条目；每次运行覆盖同名输出。
-TSV 的 start/end 是 1-based、两端包含的范围；location_0based 保留
-Biopython 的完整位置表示（0-based、右端不包含），包括分段和模糊边界。
+Write core_genes.faa (existing protein translations), core_genes.fna (CDS nucleotide
+sequences), core_genes.tsv (annotations), and no_core_files.tsv (a manual review
+list of files without core labels).
+Skip entries without core labels; overwrite outputs with the same names on each run.
+TSV start/end coordinates are 1-based and inclusive; location_0based preserves
+Biopython's full location representation (0-based, end-exclusive), including
+compound locations and fuzzy boundaries.
 """
 
 import argparse
@@ -22,7 +24,7 @@ try:
     from Bio.Seq import Seq
     from Bio.SeqRecord import SeqRecord
 except ImportError as exc:
-    raise SystemExit("缺少 Biopython，请先运行：python -m pip install biopython") from exc
+    raise SystemExit("Biopython is required. Install it with: python -m pip install biopython") from exc
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,10 +41,10 @@ NO_CORE_FIELDS = [
 
 
 def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
-    """按文件名排序提取全部 core CDS；gene_index 为文件内 CDS 的 1-based 序号。"""
+    """Extract all core CDS in filename order; gene_index is the 1-based CDS index within each file."""
     gbk_files = sorted(input_dir.glob("*.gbk"))
     if not gbk_files:
-        raise ValueError(f"输入目录不存在或没有 .gbk 文件：{input_dir}")
+        raise ValueError(f"Input directory does not exist or contains no .gbk files: {input_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     counts = {"files": len(gbk_files), "files_with_core": 0,
@@ -91,19 +93,19 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
                         if "biosynthetic" not in qualifiers.get("gene_kind", []):
                             continue
                         if feature.location is None:
-                            raise ValueError(f"{gbk_file.name} 的 CDS {gene_index} 缺少有效坐标")
+                            raise ValueError(f"CDS {gene_index} in {gbk_file.name} has no valid location")
 
                         gene = qualifiers.get("gene", [""])[0]
                         locus_tag = qualifiers.get("locus_tag", [""])[0]
                         protein_id = qualifiers.get("protein_id", [""])[0]
                         label = locus_tag or gene or protein_id or f"CDS_{gene_index}"
-                        # FASTA 标识符不能含空白；序号可区分重复基因名称。
+                        # FASTA identifiers cannot contain whitespace; the index distinguishes duplicate gene names.
                         label = "_".join(label.split())
                         sequence_id = f"{bgc_id}|{gene_index}|{label}"
                         product = qualifiers.get("product", [""])[0]
                         description = " ".join(product.split())
 
-                        # extract 自动处理 complement 和 join，保留 CDS 的编码方向。
+                        # extract handles complement and join automatically, preserving the CDS coding orientation.
                         dna = feature.extract(record.seq)
                         SeqIO.write(SeqRecord(dna, id=sequence_id, description=description),
                                     nucleotides, "fasta")
@@ -114,7 +116,7 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
                                 proteins, "fasta",
                             )
                         else:
-                            # 不自行推断翻译，避免不完整 CDS 或特殊翻译规则造成错误。
+                            # Do not infer translations, to avoid errors from incomplete CDS or special translation rules.
                             counts["missing_translation"] += 1
 
                         writer.writerow({
@@ -166,23 +168,23 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input-dir", type=Path,
                         default=PROJECT_ROOT / "data/raw/mibig_gbk_4.0",
-                        help="包含 .gbk 文件的目录（不递归搜索）")
+                        help="Directory containing .gbk files (non-recursive search)")
     parser.add_argument("--output-dir", type=Path,
                         default=PROJECT_ROOT / "data/processed/core_genes",
-                        help="结果目录，同名结果会被覆盖")
+                        help="Output directory; existing files with the same names will be overwritten")
     args = parser.parse_args()
     if not args.input_dir.is_dir():
-        parser.error(f"输入目录不存在：{args.input_dir}")
+        parser.error(f"Input directory does not exist: {args.input_dir}")
     if not any(args.input_dir.glob("*.gbk")):
-        parser.error(f"输入目录没有 .gbk 文件：{args.input_dir}")
+        parser.error(f"Input directory contains no .gbk files: {args.input_dir}")
     counts = extract_core_genes(args.input_dir, args.output_dir)
-    print(f"扫描 GBK 文件：{counts['files']}")
-    print(f"含 core 标签的文件：{counts['files_with_core']}")
-    print(f"跳过无 core 标签的文件：{counts['files'] - counts['files_with_core']}")
-    print(f"提取 core CDS：{counts['core_genes']}")
-    print(f"缺少 translation 的 core CDS：{counts['missing_translation']}（仅输出核酸和注释）")
-    print(f"输出目录：{args.output_dir.resolve()}")
-    print(f"无 core 标签的人工核查清单：{(args.output_dir / 'no_core_files.tsv').resolve()}")
+    print(f"GBK files scanned: {counts['files']}")
+    print(f"Files with core labels: {counts['files_with_core']}")
+    print(f"Files skipped without core labels: {counts['files'] - counts['files_with_core']}")
+    print(f"Core CDS extracted: {counts['core_genes']}")
+    print(f"Core CDS missing translation: {counts['missing_translation']} (nucleotide sequences and annotations only)")
+    print(f"Output directory: {args.output_dir.resolve()}")
+    print(f"Manual review list of files without core labels: {(args.output_dir / 'no_core_files.tsv').resolve()}")
 
 
 if __name__ == "__main__":
