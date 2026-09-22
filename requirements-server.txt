@@ -1,0 +1,5 @@
+# Install only on the training server. Preserve its existing CUDA-enabled torch.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.11.0+cu130
+esm==3.2.1
+transformers==4.48.1

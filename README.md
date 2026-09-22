@@ -2,6 +2,9 @@
 
 A project for biosynthetic gene cluster (BGC) analysis and retrieval using MIBiG data.
 The current implementation extracts core biosynthetic genes from annotated GenBank files.
+It also includes a residual Transformer for aggregating frozen ESMC chunk embeddings
+of long NRPS/PKS proteins. See [the aggregation workflow](docs/aggregation.md) for
+local data preparation, server installation, training, evaluation, and inference.
 See [DESIGN.md](DESIGN.md) for the proposed architecture and research roadmap.
 
 ## Getting started

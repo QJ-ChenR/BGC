@@ -1,5 +1,7 @@
 # Downloaded data and generated artifacts
 /data/
+/runs/
+/results/
 
 # Local environments and Python caches
 .venv/
