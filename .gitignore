@@ -2,6 +2,7 @@
 /data/
 /runs/
 /results/
+/logs/
 
 # Local environments and Python caches
 .venv/

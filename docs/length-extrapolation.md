@@ -96,6 +96,54 @@ The cutoff can be changed with `--length-cutoff` before preparing a new dataset.
 It must be between 2 and 2,046; cohort boundaries and training restrictions follow
 it. The 3-to-4-chunk interpretation above specifically describes cutoff 1,500.
 
+## Run training and evaluation with one script
+
+After completing feature extraction, the server instructions' steps 5 and 6 can
+be run together from the active PyTorch environment:
+
+```bash
+python script/run_length_extrapolation.py
+```
+
+The default cache is `data/embeddings/length1500_no_mmseqs`, matching the
+no-MMseqs2 server walkthrough. For the `length1500` paths in this guide, use:
+
+```bash
+python script/run_length_extrapolation.py \
+  --cache data/embeddings/length1500 \
+  --prefix length1500
+```
+
+The script runs Transformer and MLP training sequentially for seeds 42, 43, and
+44, using fixed views, native target proteins, 100 maximum epochs, batch size 64,
+learning rate 1e-4, and patience 10. After all six training calls succeed, it
+evaluates all six best checkpoints on the test split, with 2,000 bootstrap draws,
+bootstrap seed 42, and SVG plots. Weighted means are included automatically by
+the evaluator. Relative cache paths and all output paths refer to the project
+root, even when the script is invoked from another directory.
+
+Runs, results, and logs use `<prefix>_<architecture>_s<seed>` names in `runs/`,
+`results/`, and `logs/`. Logs append on reruns and are ignored by Git. A failed
+command stops the script before any remaining jobs start. Matching existing
+`run.json`, `last.pt`, and `best.pt` enable automatic checkpoint resume. Completed
+training runs return without further epochs, and evaluation can be repeated;
+existing evaluation files for the same run are replaced. Mismatched or incomplete
+run directories are preserved and cause an error; use a new prefix for a different
+experiment. The script does not generate data or ESMC features.
+
+To inspect short validation results before deciding to start final testing:
+
+```bash
+python script/run_length_extrapolation.py --stage train
+python script/run_length_extrapolation.py --stage evaluate
+```
+
+Both invocations must use the same cache and prefix when overriding defaults.
+`--device cuda:0` selects a GPU; `--no-plots` omits SVGs and the matplotlib
+requirement. The training environment is taken from the Python interpreter used
+to launch the script. The explicit commands below remain available for individual
+runs and custom experiments.
+
 ## Train the model and control
 
 ```bash
