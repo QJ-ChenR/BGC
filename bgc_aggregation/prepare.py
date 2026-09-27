@@ -10,6 +10,8 @@ from .chunking import make_views
 from .common import (MAX_RESIDUES, SCHEMA_VERSION, TARGET_FAMILIES, digest,
                      file_digest, read_fasta, read_table, stable_seed, write_json,
                      write_jsonl)
+from .protocol import (LENGTH_PROTOCOL, cohort_counts, experiment_config, experiment_role,
+                       validate_length_entries)
 
 
 NRPS_RULES = {"NRPS", "NRPS-like", "NRP-metallophore"}
@@ -111,6 +113,8 @@ def crop_intervals(length, count, seed):
 
 
 def prepare(args):
+    experiment = experiment_config(args)
+    length_experiment = experiment["protocol"] == LENGTH_PROTOCOL
     sequences, annotations = read_fasta(args.fasta), read_table(args.annotations)
     if set(sequences) - set(annotations):
         raise ValueError("Every FASTA protein must have an annotation row")
@@ -134,12 +138,16 @@ def prepare(args):
     split_parents(parents, args.clusters, args.seed)
     samples = []
     for parent in parents:
+        if length_experiment:
+            parent["experiment_role"] = experiment_role(parent, args.scope, experiment["length_cutoff"])
+            if parent["experiment_role"].startswith("excluded_"):
+                continue
         is_target = parent["family"] in TARGET_FAMILIES
         if parent["length"] <= MAX_RESIDUES and (is_target or args.scope == "all"):
             intervals = [(0, parent["length"])]
             source = "native"
         elif parent["length"] > MAX_RESIDUES and is_target:
-            intervals = crop_intervals(parent["length"], args.crops_per_parent,
+            intervals = crop_intervals(parent["length"], experiment["crops_per_parent"],
                                        stable_seed(args.seed, parent["parent_id"]))
             source = "crop"
         else:
@@ -151,7 +159,9 @@ def prepare(args):
                             "group_id": parent["group_id"], "split": parent["split"],
                             "source": source, "crop_start": start, "crop_end": end,
                             "sequence": parent["sequence"][start:end], "length": end - start,
-                            "views": make_views(end - start, sample_id, args.seed, halo=args.halo)})
+                            "views": make_views(end - start, sample_id, args.seed, halo=args.halo,
+                                                mode=experiment["chunk_views"])})
+    length_cohorts = validate_length_entries(samples, experiment) if length_experiment else None
     for split in ("train", "validation", "test"):
         if not any(s["split"] == split and s["family"] in TARGET_FAMILIES for s in samples):
             raise ValueError(f"No target teacher samples in {split}; inspect groups or change the split seed")
@@ -163,6 +173,8 @@ def prepare(args):
     write_jsonl(output / "samples.jsonl", samples)
     with (output / "selection.tsv").open("w", newline="") as handle:
         fields = ["sequence_id", "bgc_id", "family", "label_source", "rules", "length", "group_id", "split", "target_family"]
+        if length_experiment:
+            fields.append("experiment_role")
         writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", extrasaction="ignore")
         writer.writeheader()
         for parent in parents:
@@ -177,9 +189,12 @@ def prepare(args):
                "largest_group_parents": max(Counter(p["group_id"] for p in parents).values()),
                "unselected_long_ids": [p["parent_id"] for p in parents
                                        if p["length"] > MAX_RESIDUES and p["family"] not in TARGET_FAMILIES]}
-    metadata = {"schema_version": SCHEMA_VERSION, "seed": args.seed, "scope": args.scope,
+    if length_experiment:
+        summary["length_cohorts"] = length_cohorts
+        summary["parent_roles"] = cohort_counts(parents, lambda p: p["experiment_role"])
+    metadata = {"experiment": experiment, "schema_version": SCHEMA_VERSION, "seed": args.seed, "scope": args.scope,
                 "halo": args.halo, "deployment_core_size": 512, "max_residues": MAX_RESIDUES,
-                "crops_per_parent": args.crops_per_parent,
+                "crops_per_parent": experiment["crops_per_parent"],
                 "homology_clustered": bool(args.clusters),
                 "input_hashes": {"fasta": file_digest(args.fasta), "annotations": file_digest(args.annotations),
                                  "clusters": file_digest(args.clusters) if args.clusters else None,
@@ -197,4 +212,10 @@ def prepare(args):
     if summary["unselected_long_ids"]:
         print(f"Long proteins outside the target rule filter: {len(summary['unselected_long_ids'])}. "
               "Review dataset.json/selection.tsv and use --labels for reviewed overrides.")
-    print("Crop targets represent isolated fragments, not full-length long-protein embeddings.")
+    if length_experiment:
+        print(f"Length-extrapolation cutoff: {experiment['length_cutoff']}; chunk views: {experiment['chunk_views']}")
+        for name, counts in length_cohorts.items():
+            print(f"  {name}: {counts}")
+        print("Long training/validation proteins are excluded; test_short and test_long are held out.")
+    else:
+        print("Crop targets represent isolated fragments, not full-length long-protein embeddings.")

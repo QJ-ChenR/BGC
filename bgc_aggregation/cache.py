@@ -7,6 +7,7 @@ import torch
 from .chunking import position_features
 from .common import (SCHEMA_VERSION, digest, file_digest, read_json, read_jsonl,
                      verify_dataset, write_json)
+from .protocol import is_length_experiment, validate_length_entries
 
 
 def save_tensor_file(path, value):
@@ -37,10 +38,14 @@ def extract_cache(args):
 
     dataset = verify_dataset(args.dataset)
     samples = read_jsonl(Path(args.dataset) / "samples.jsonl")
+    if is_length_experiment(dataset):
+        validate_length_entries(samples, dataset["experiment"])
     encoder = ESMCEncoder(args.model, args.device, args.weights, args.esm_batch_size, args.token_budget)
     contract = {"schema_version": SCHEMA_VERSION, "dataset_id": dataset["dataset_id"],
                 "encoder": encoder.identity, "halo": dataset["halo"],
                 "deployment_core_size": dataset["deployment_core_size"]}
+    if "experiment" in dataset:
+        contract["experiment"] = dataset["experiment"]
     cache_id = digest(contract)
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -88,6 +93,8 @@ def load_cache(directory):
         path = directory / entry["file"]
         if not path.is_file() or file_digest(path) != entry["sha256"]:
             raise ValueError(f"Missing or modified cache file: {path}")
+    if is_length_experiment(metadata):
+        validate_length_entries(metadata["entries"], metadata["experiment"])
     return metadata
 
 

@@ -5,6 +5,12 @@ ESMC residue-mean embedding from independently encoded chunks. The target use is
 long NRPS/PKS proteins. ESMC is frozen throughout; only the aggregator is trained.
 All commands below run from the repository root.
 
+To test whether short-protein aggregation generalizes to longer proteins, use the
+[length-extrapolation protocol](length-extrapolation.md). It enforces natural
+training/validation proteins below 1,500 aa, defaults to fixed chunk views, and
+reports held-out 1,500–2,046 aa reconstruction with group-bootstrap intervals.
+The standard workflow below retains its original multiscale/crop behavior.
+
 ## Local versus server requirements
 
 Data preparation, CLI help, and preparation tests use only Python's standard
@@ -148,6 +154,7 @@ Set `--crops-per-parent 0` for a natural-short-protein-only dataset.
 Crops inherit their parent's split. Training uses only training-parent crops;
 validation/test crops provide isolated-fragment reconstruction checks on held-out
 parents. Their teachers do not represent the embedding of the full long protein.
+The separate `--protocol length-extrapolation` mode disables all crops.
 No unrelated fragments are concatenated into artificial teacher proteins.
 
 Each teacher sample has the deployment partition plus unique alternative

@@ -225,6 +225,29 @@ harness.
 11. **Extensions (M6)**: contrastive aggregation, ESM-C/ProtT5, web UI
     (streamlit), scale-up to antiSMASH-DB queries.
 
+## Implemented length-extrapolation experiment
+
+The ESMC aggregation workflow now has a separate `length-extrapolation` preparation
+protocol. See [the experiment guide](docs/length-extrapolation.md) for commands and
+interpretation. This implements an evaluation protocol; it does not establish that
+the extrapolation hypothesis has been confirmed on real ESMC embeddings.
+
+- Build the existing BGC/exact-duplicate/optional-homology groups before filtering.
+- Train and choose checkpoints only on natural proteins below 1,500 aa; exclude
+  longer train/validation parents and all long-protein crops.
+- Retain short and 1,500–2,046 aa test cohorts, with full-sequence ESMC teachers.
+- Default to 512-aa cores, 64-aa context flanks, and zero offset. Training sees
+  at most three chunks; test proteins above 1,536 aa have four.
+- Compare the residual Transformer, mean-vector MLP, and weighted-mean baseline;
+  treat multiscale training as a separate augmentation experiment.
+- Report raw MSE, cosine distance, neighbor preservation, length/family strata,
+  group-bootstrap confidence intervals, and optional standalone SVG figures.
+- Record the protocol and available training length/chunk-count range in caches and
+  checkpoints; reject pretrained aggregator initialization for this experiment.
+
+Evidence is limited to the tested interval and cohort. Longer full-length proteins,
+shared domain architectures, and biological retrieval remain separate evaluations.
+
 ## Reproducibility practices
 
 - Pinned MiBIG release + checksums; raw data immutable.

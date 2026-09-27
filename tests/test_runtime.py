@@ -204,6 +204,170 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "differ"):
                 load_checkpoint(root / "full/best.pt", changed)
 
+    def test_length_protocol_survives_feature_caching(self):
+        class FakeEncoder:
+            identity = {"embedding_dim": 2, "model": "fake"}
+
+            def __init__(self, *args):
+                pass
+
+            def pool(self, requests):
+                return [torch.tensor([float(end - start), 1.0]) for _, start, end in requests]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "prepared"
+            dataset.mkdir()
+            experiment = {"protocol": "length-extrapolation", "length_cutoff": 1500,
+                          "chunk_views": "fixed", "crops_per_parent": 0}
+            samples = []
+            for i, (split, length) in enumerate([("train", 1499), ("validation", 1499),
+                                               ("test", 1499), ("test", 1537)]):
+                samples.append({"sample_id": str(i), "parent_id": str(i), "group_id": str(i),
+                                "bgc_id": str(i), "family": "NRPS", "source": "native", "split": split,
+                                "length": length, "sequence": "A" * length,
+                                "views": make_views(length, str(i), mode="fixed")})
+            write_jsonl(dataset / "samples.jsonl", samples)
+            write_jsonl(dataset / "parents.jsonl", [])
+            write_json(dataset / "dataset.json", {"schema_version": 1, "dataset_id": "length-test",
+                       "files": {name: file_digest(dataset / name) for name in ("samples.jsonl", "parents.jsonl")},
+                       "halo": 64, "deployment_core_size": 512, "summary": {}, "homology_clustered": False,
+                       "experiment": experiment})
+            args = build_parser().parse_args(["cache", "--dataset", str(dataset),
+                                             "--output", str(root / "cache"), "--device", "cpu"])
+            with patch("bgc_aggregation.encoder.ESMCEncoder", FakeEncoder):
+                extract_cache(args)
+            cached = load_cache(root / "cache")
+            self.assertEqual(cached["experiment"], experiment)
+            self.assertEqual([e["split"] for e in cached["entries"]], [s["split"] for s in samples])
+            self.assertTrue(all(e["views"] == 1 for e in cached["entries"]))
+            held_out = torch.load(root / "cache/3.pt", weights_only=True)
+            self.assertEqual(len(held_out["views"][0]["weights"]), 4)
+
+    def make_length_cache(self, directory):
+        metadata = self.make_cache(directory)
+        metadata["experiment"] = {"protocol": "length-extrapolation", "length_cutoff": 1500,
+                                  "chunk_views": "multiscale", "crops_per_parent": 0}
+        for index, entry in enumerate(metadata["entries"]):
+            length = (800, 1024, 1499)[index % 3] if index < 14 else (1499, 1500, 1537, 2046)[index - 14]
+            entry["length"] = length
+            views = [self.features((length + 511) // 512), self.features(12)]
+            views[1].update(core_size=128, offset=20)
+            target = (views[0]["embeddings"] * views[0]["weights"].unsqueeze(-1)).sum(0) + 0.15
+            path = directory / entry["file"]
+            save_tensor_file(path, {"cache_id": metadata["cache_id"], "sample_id": entry["sample_id"],
+                                    "teacher": target, "views": views})
+            entry["sha256"] = file_digest(path)
+        write_json(directory / "cache.json", metadata)
+        return metadata
+
+    def test_length_training_fixed_views_statistics_and_evaluation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            metadata = self.make_length_cache(cache)
+            entries = [e for e in metadata["entries"] if e["split"] == "train"]
+            dataset = ParentDataset(cache, entries, views="fixed")
+            for epoch in range(10):
+                dataset.epoch = epoch
+                self.assertTrue(all(len(dataset[i]["weights"]) <= 3 for i in range(len(dataset))))
+            args = self.training_args(cache, root / "run")
+            train(args)
+            checkpoint = torch.load(root / "run/best.pt", weights_only=True)
+            self.assertEqual(checkpoint["training_config"]["views"], "fixed")
+            self.assertEqual(checkpoint["training_config"]["sources"], "native")
+            self.assertEqual(checkpoint["training_inputs"]["max_chunks"], 3)
+            self.assertLess(checkpoint["validation_inputs"]["max_length"], 1500)
+            expected = teacher_statistics(cache, entries)
+            torch.testing.assert_close(checkpoint["teacher_statistics"]["mean"], expected["mean"])
+            flags = ["--plots"] if importlib.util.find_spec("matplotlib") else []
+            evaluation = build_parser().parse_args([
+                "evaluate", "--cache", str(cache), "--checkpoint", str(root / "run/best.pt"),
+                "--output", str(root / "report"), "--bootstrap-replicates", "50", "--device", "cpu", *flags])
+            evaluate(evaluation)
+            report = read_json(root / "report/metrics.json")["length_extrapolation"]
+            self.assertEqual(report["cohorts"]["short"]["overall"]["proteins"], 1)
+            self.assertEqual(report["cohorts"]["long"]["overall"]["proteins"], 3)
+            self.assertEqual(report["cohorts"]["long_beyond_chunk_range"]["overall"]["proteins"], 2)
+            self.assertEqual(report["cohorts"]["long"]["neighborhood_retention"]["eligible_queries"], 3)
+            self.assertEqual(report["cohorts"]["long"]["neighborhood_retention"]["gallery_parents"], 4)
+            self.assertTrue((root / "report/length_summary.tsv").is_file())
+            if flags:
+                self.assertTrue((root / "report/length_error.svg").is_file())
+                self.assertTrue((root / "report/length_gain.svg").is_file())
+            evaluation.all_views = True
+            evaluation.output = root / "all_views"
+            evaluate(evaluation)
+            augmented_report = read_json(root / "all_views/metrics.json")["length_extrapolation"]
+            self.assertEqual(report, augmented_report)
+            evaluation.split, evaluation.output = "validation", root / "validation_report"
+            evaluate(evaluation)
+            validation = read_json(root / "validation_report/metrics.json")["length_extrapolation"]
+            self.assertIsNone(validation["cohorts"]["long"]["overall"])
+            augmented_args = self.training_args(cache, root / "multiscale")
+            augmented_args.views = "multiscale"
+            train(augmented_args)
+            augmented_checkpoint = torch.load(root / "multiscale/last.pt", weights_only=True)
+            self.assertEqual(augmented_checkpoint["training_inputs"]["max_chunks"], 12)
+
+    def test_length_training_rejects_leakage_pretraining_and_missing_views(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            metadata = self.make_length_cache(cache)
+            args = self.training_args(cache, root / "run")
+            args.init_from = root / "old.pt"
+            with self.assertRaisesRegex(ValueError, "init-from"):
+                train(args)
+            args.init_from = None
+            args.sources = "crop"
+            with self.assertRaisesRegex(ValueError, "native"):
+                train(args)
+            args.sources = "native"
+            metadata["entries"][0]["length"] = 1500
+            write_json(cache / "cache.json", metadata)
+            with self.assertRaisesRegex(ValueError, "shorter"):
+                train(args)
+            metadata["entries"][0]["length"] = 800
+            metadata["experiment"]["chunk_views"] = "fixed"
+            write_json(cache / "cache.json", metadata)
+            args.views = "multiscale"
+            with self.assertRaisesRegex(ValueError, "chunk-views multiscale"):
+                train(args)
+            self.assertFalse((root / "run").exists())
+
+    def test_length_resume_restores_fixed_sampling_and_protocol(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            self.make_length_cache(cache)
+            train(self.training_args(cache, root / "full"))
+            args = self.training_args(cache, root / "resumed")
+
+            class Interrupted(Exception):
+                pass
+
+            def interrupt(path, value):
+                save_tensor_file(path, value)
+                if Path(path).name == "last.pt" and value["epoch"] == 1:
+                    raise Interrupted()
+
+            with patch("bgc_aggregation.train.save_tensor_file", side_effect=interrupt):
+                with self.assertRaises(Interrupted):
+                    train(args)
+            args.resume = root / "resumed/last.pt"
+            args.views = "multiscale"  # Resume must preserve the original fixed-view protocol.
+            train(args)
+            expected = torch.load(root / "full/last.pt", weights_only=True)
+            actual = torch.load(args.resume, weights_only=True)
+            self.assertEqual(actual["training_config"]["views"], "fixed")
+            for key in expected["model_state"]:
+                torch.testing.assert_close(expected["model_state"][key], actual["model_state"][key], atol=0, rtol=0)
+            actual["experiment"]["length_cutoff"] = 1600
+            save_tensor_file(args.resume, actual)
+            with self.assertRaisesRegex(ValueError, "protocol differs"):
+                train(args)
+
     def test_neighbors_exclude_same_group_and_duplicate_parents(self):
         vectors = torch.eye(4)
         tensors = {"model": vectors, "teacher": vectors, "baseline": vectors,
@@ -211,6 +375,9 @@ class RuntimeTests(unittest.TestCase):
         report = neighborhood_retention(tensors, k=2)
         self.assertEqual(report["model"], 1.0)
         self.assertEqual(report["eligible_queries"], 4)
+        restricted = neighborhood_retention(tensors, k=2, query_parents={"2"})
+        self.assertEqual(restricted["eligible_queries"], 1)
+        self.assertEqual(restricted["gallery_parents"], 4)
 
 
 if __name__ == "__main__":

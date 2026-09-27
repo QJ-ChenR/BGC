@@ -9,19 +9,23 @@ from torch.utils.data import DataLoader
 
 from .cache import feature_contract, load_cache, save_tensor_file
 from .common import stable_seed, write_json
-from .data import (ParentDataset, collate, predict_batch, select_entries,
+from .data import (ParentDataset, collate, input_summary, predict_batch, select_entries,
                    teacher_statistics, to_device)
 from .encoder import select_device
 from .evaluate import load_checkpoint, reconstruct, summarize
 from .model import ChunkAggregator, ModelConfig, reconstruction_loss
+from .protocol import is_length_experiment
 
 
 TRAINING_KEYS = ("epochs", "batch_size", "learning_rate", "weight_decay", "warmup_fraction",
-                 "patience", "cosine_weight", "seed", "scope", "sources", "gradient_clip")
+                 "patience", "cosine_weight", "seed", "scope", "sources", "gradient_clip", "views")
 
 
 def train(args):
     cache = load_cache(args.cache)
+    length_experiment = is_length_experiment(cache)
+    if length_experiment and args.init_from:
+        raise ValueError("Length-extrapolation starts from random aggregator weights; --init-from is not allowed")
     device = select_device(args.device)
     output = Path(args.output)
     if args.resume and args.init_from:
@@ -30,7 +34,10 @@ def train(args):
         if Path(args.resume).resolve().parent != output.resolve() or not (output / "best.pt").is_file():
             raise ValueError("Resume in the original run directory containing best.pt")
         model, saved = load_checkpoint(args.resume, cache, device)
-        config = saved["training_config"]
+        config = dict(saved["training_config"])
+        config.setdefault("views", "multiscale")
+        if length_experiment and saved.get("experiment") != cache["experiment"]:
+            raise ValueError("Checkpoint length-extrapolation protocol differs from the cache")
         print("Resuming saved model, optimizer, scheduler, RNG, and training settings.")
     else:
         if output.exists() and any(output.iterdir()):
@@ -56,10 +63,19 @@ def train(args):
             or not 0 <= config["warmup_fraction"] < 1
             or config["cosine_weight"] < 0 or config["gradient_clip"] <= 0):
         raise ValueError("Invalid training hyperparameters")
+    config["views"] = config.get("views") or ("fixed" if length_experiment else "multiscale")
+    if length_experiment:
+        if config["sources"] == "crop":
+            raise ValueError("Length-extrapolation accepts only native proteins")
+        config["sources"] = "native"
+        if config["views"] == "multiscale" and cache["experiment"]["chunk_views"] != "multiscale":
+            raise ValueError("Multiscale training requires a cache prepared with --chunk-views multiscale")
     training_entries = select_entries(cache, "train", config["scope"], config["sources"])
     # Model selection always targets NRPS/PKS, including when pretraining on all families.
     validation_entries = select_entries(cache, "validation", "target", config["sources"])
-    dataset = ParentDataset(args.cache, training_entries, config["seed"])
+    dataset = ParentDataset(args.cache, training_entries, config["seed"], config["views"])
+    training_summary = input_summary(args.cache, training_entries, config["views"], strict=length_experiment)
+    validation_summary = input_summary(args.cache, validation_entries, "fixed", strict=length_experiment)
     statistics = saved["teacher_statistics"] if saved else teacher_statistics(args.cache, training_entries)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"],
                                  weight_decay=config["weight_decay"])
@@ -85,7 +101,9 @@ def train(args):
     output.mkdir(parents=True, exist_ok=True)
     write_json(output / "run.json", {"training": config, "model": model.specification(),
                "cache_id": cache["cache_id"], "feature_contract": feature_contract(cache),
-               "training_parents": len(dataset), "torch_version": str(torch.__version__),
+               "training_parents": len(dataset), "training_inputs": training_summary,
+               "validation_inputs": validation_summary, "experiment": cache.get("experiment"),
+               "torch_version": str(torch.__version__),
                "device": str(device), "cuda_version": torch.version.cuda,
                "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
                "initial_checkpoint": str(args.init_from) if args.init_from else None})
@@ -95,7 +113,9 @@ def train(args):
                 "model_state": model.state_dict(), "optimizer_state": optimizer.state_dict(),
                 "scheduler_state": scheduler.state_dict(), "teacher_statistics": statistics,
                 "feature_contract": feature_contract(cache), "cache_id": cache["cache_id"],
-                "training_config": config, "epoch": epoch, "best_loss": best_loss,
+                "training_config": config, "experiment": cache.get("experiment"),
+                "training_inputs": training_summary, "validation_inputs": validation_summary,
+                "epoch": epoch, "best_loss": best_loss,
                 "stale_epochs": stale, "history": history,
                 "torch_rng_state": torch.get_rng_state(),
                 "cuda_rng_state": torch.cuda.get_rng_state_all() if device.type == "cuda" else []}

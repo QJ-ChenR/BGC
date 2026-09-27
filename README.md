@@ -5,6 +5,9 @@ The current implementation extracts core biosynthetic genes from annotated GenBa
 It also includes a residual Transformer for aggregating frozen ESMC chunk embeddings
 of long NRPS/PKS proteins. See [the aggregation workflow](docs/aggregation.md) for
 local data preparation, server installation, training, evaluation, and inference.
+Use the [length-extrapolation experiment](docs/length-extrapolation.md) to train on
+proteins shorter than 1,500 aa and test reconstruction on held-out 1,500–2,046 aa
+proteins, with grouped splits and confidence intervals.
 See [DESIGN.md](DESIGN.md) for the proposed architecture and research roadmap.
 
 ## Getting started

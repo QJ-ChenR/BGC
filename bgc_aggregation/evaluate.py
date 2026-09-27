@@ -10,7 +10,9 @@ from torch.nn import functional as F
 from .cache import feature_contract, load_cache
 from .common import write_json
 from .data import collate, load_record, predict_batch, select_entries, to_device
+from .length_evaluation import length_report, plot_length_report, write_length_table
 from .model import ChunkAggregator, ModelConfig, weighted_mean
+from .protocol import is_length_experiment
 
 
 METRICS = ("model_mse", "baseline_mse", "mean_mse", "model_raw_mse", "baseline_raw_mse", "mean_raw_mse", "model_cosine_distance",
@@ -58,16 +60,20 @@ def reconstruct(model, directory, entries, statistics, device, batch_size=64,
                 baselines.append(baseline[index])
                 item_metadata.append(entry)
 
-    for entry in entries:
-        record = load_record(directory, entry)
-        views = record["views"] if all_views else record["views"][:1]
-        for index, view in enumerate(views):
-            pending.append({**view, "teacher": record["teacher"], "entry": entry, "view_index": index})
-            if len(pending) == batch_size:
-                consume(pending)
-                pending = []
-    if pending:
-        consume(pending)
+    # Keep deployment batches identical with and without --all-views. Mixing
+    # augmented chunks into those batches changes padding and floating-point results.
+    for alternate in ((False, True) if all_views else (False,)):
+        for entry in entries:
+            record = load_record(directory, entry)
+            views = record["views"][1:] if alternate else record["views"][:1]
+            for index, view in enumerate(views, start=1 if alternate else 0):
+                pending.append({**view, "teacher": record["teacher"], "entry": entry, "view_index": index})
+                if len(pending) == batch_size:
+                    consume(pending)
+                    pending = []
+        if pending:
+            consume(pending)
+            pending = []
     tensors = {"model": torch.stack(predictions), "teacher": torch.stack(teachers),
                "baseline": torch.stack(baselines), "entries": item_metadata}
     return rows, tensors
@@ -91,7 +97,7 @@ def summarize(rows):
     return report
 
 
-def neighborhood_retention(tensors, k=10, center=None):
+def neighborhood_retention(tensors, k=10, center=None, query_parents=None):
     """Compare predicted and teacher neighbor sets in the same teacher gallery.
 
     Exclude every candidate in the query's split group, including related crops.
@@ -116,6 +122,8 @@ def neighborhood_retention(tensors, k=10, center=None):
         scores = {key: (value[start:end] @ gallery.T).masked_fill(blocked, -float("inf"))
                   for key, value in vectors.items()}
         for row in range(end - start):
+            if query_parents is not None and entries[start + row]["parent_id"] not in query_parents:
+                continue
             actual_k = min(k, int((~blocked[row]).sum()))
             if actual_k == 0:
                 continue
@@ -123,7 +131,7 @@ def neighborhood_retention(tensors, k=10, center=None):
             for key in totals:
                 observed = set(scores[key][row].topk(actual_k).indices.tolist())
                 totals[key].append(len(expected & observed) / actual_k)
-    return {"requested_k": k, "eligible_queries": len(totals["model"]),
+    return {"requested_k": k, "gallery_parents": len(entries), "eligible_queries": len(totals["model"]),
             **{key: sum(values) / len(values) if values else None for key, values in totals.items()}}
 
 
@@ -143,8 +151,16 @@ def evaluate(args):
     from .encoder import select_device
 
     cache = load_cache(args.cache)
+    length_experiment = is_length_experiment(cache)
+    if args.plots:
+        if not length_experiment:
+            raise ValueError("--plots requires a length-extrapolation cache")
+        import matplotlib  # Fail before evaluation if the requested plot dependency is missing.
     device = select_device(args.device)
     model, checkpoint = load_checkpoint(args.checkpoint, cache, device)
+    if length_experiment and (checkpoint.get("experiment") != cache["experiment"]
+                              or not checkpoint.get("training_inputs")):
+        raise ValueError("Checkpoint does not record this length-extrapolation protocol and training inputs")
     entries = select_entries(cache, args.split, args.scope, args.sources)
     rows, tensors = reconstruct(model, args.cache, entries, checkpoint["teacher_statistics"],
                                device, args.batch_size, checkpoint["training_config"]["cosine_weight"],
@@ -158,6 +174,23 @@ def evaluate(args):
                       tensors, args.neighbors, checkpoint["teacher_statistics"]["mean"]))
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
+    if length_experiment:
+        detail, cohorts = length_report(rows, cache["experiment"], checkpoint["training_inputs"], args.split,
+                                        args.bootstrap_replicates, args.bootstrap_seed)
+        for name, selected in cohorts.items():
+            queries = {r["parent_id"] for r in selected}
+            detail["cohorts"][name]["neighborhood_retention"] = neighborhood_retention(
+                tensors, args.neighbors, query_parents=queries)
+            detail["cohorts"][name]["centered_neighborhood_retention"] = neighborhood_retention(
+                tensors, args.neighbors, checkpoint["teacher_statistics"]["mean"], query_parents=queries)
+        report["length_extrapolation"] = detail
+        write_length_table(detail, output)
+        if args.plots:
+            plot_length_report(detail, output)
+        long_result = detail["cohorts"]["long"]["overall"]
+        if long_result:
+            print(f"Long-cohort raw-MSE evidence vs weighted mean: {long_result['evidence']} "
+                  f"({long_result['groups']} groups)")
     write_json(output / "metrics.json", report)
     with (output / "per_sample.tsv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]), delimiter="\t")

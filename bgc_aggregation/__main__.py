@@ -39,7 +39,13 @@ def build_parser():
     prepare.add_argument("--labels", type=Path, help="Optional TSV overrides with sequence_id and family columns")
     prepare.add_argument("--clusters", type=Path, help="Complete headerless MMseqs2 representative/member TSV")
     prepare.add_argument("--scope", choices=("target", "all"), default="target")
-    prepare.add_argument("--crops-per-parent", type=nonnegative, default=4)
+    prepare.add_argument("--protocol", choices=("standard", "length-extrapolation"), default="standard")
+    prepare.add_argument("--length-cutoff", type=positive, default=1500,
+                         help="Exclusive training/validation length limit for length-extrapolation")
+    prepare.add_argument("--chunk-views", choices=("fixed", "multiscale"),
+                         help="Default: fixed for length-extrapolation, multiscale otherwise")
+    prepare.add_argument("--crops-per-parent", type=nonnegative,
+                         help="Default: 0 for length-extrapolation, 4 otherwise")
     prepare.add_argument("--halo", type=nonnegative, default=64)
     prepare.add_argument("--seed", type=nonnegative, default=42)
 
@@ -72,6 +78,8 @@ def build_parser():
     train.add_argument("--seed", type=nonnegative, default=42)
     train.add_argument("--scope", choices=("target", "all"), default="target")
     train.add_argument("--sources", choices=("both", "native", "crop"), default="both")
+    train.add_argument("--views", choices=("fixed", "multiscale"),
+                       help="Default: fixed for length-extrapolation, multiscale otherwise")
     train.add_argument("--resume", type=Path, help="Restore an entire run from last.pt in the same output directory")
     train.add_argument("--init-from", type=Path, help="Initialize weights for a new fine-tuning run on the same cache")
 
@@ -86,6 +94,11 @@ def build_parser():
     evaluate.add_argument("--batch-size", type=positive, default=64)
     evaluate.add_argument("--neighbors", type=positive, default=10)
     evaluate.add_argument("--all-views", action="store_true", help="Also evaluate alternate chunk partitions")
+
+    evaluate.add_argument("--bootstrap-replicates", type=positive, default=2000,
+                          help="Group bootstrap draws for length-extrapolation confidence intervals")
+    evaluate.add_argument("--bootstrap-seed", type=nonnegative, default=42)
+    evaluate.add_argument("--plots", action="store_true", help="Save length-extrapolation SVG plots (requires matplotlib)")
 
     embed = commands.add_parser("embed", help="Create one vector per protein, resuming completed proteins")
     embed.add_argument("--fasta", type=Path, required=True)

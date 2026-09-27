@@ -26,7 +26,10 @@ def load_record(directory, entry):
 class ParentDataset(Dataset):
     """One example per parent per epoch, then sample a crop and a chunk view."""
 
-    def __init__(self, directory, entries, seed=42):
+    def __init__(self, directory, entries, seed=42, views="multiscale"):
+        if views not in {"fixed", "multiscale"}:
+            raise ValueError("Training views must be fixed or multiscale")
+        self.views = views
         self.directory, self.seed, self.epoch = directory, seed, 0
         groups = defaultdict(list)
         for entry in entries:
@@ -42,7 +45,7 @@ class ParentDataset(Dataset):
         entry = rng.choice(entries)
         record = load_record(self.directory, entry)
         # Half of the views use the exact deployment partition.
-        view = record["views"][0] if rng.random() < 0.5 else rng.choice(record["views"])
+        view = record["views"][0] if self.views == "fixed" or rng.random() < 0.5 else rng.choice(record["views"])
         return {**view, "teacher": record["teacher"], "entry": entry}
 
 
@@ -90,3 +93,22 @@ def teacher_statistics(directory, entries):
     if variance <= 1e-8:
         raise ValueError("Training teacher variance is too small for meaningful reconstruction")
     return {"mean": mean.float(), "variance": variance, "parents": len(groups)}
+
+
+def input_summary(directory, entries, views, strict=False):
+    """Record the length/chunk-count range available to the training sampler."""
+    counts = []
+    for entry in entries:
+        record = load_record(directory, entry)
+        first = record["views"][0]
+        if strict and (first["core_size"] != 512 or first["offset"] != 0
+                       or len(first["weights"]) != (entry["length"] + 511) // 512):
+            raise ValueError("Length-extrapolation requires a fixed 512-residue, zero-offset first view")
+        selected = record["views"][:1] if views == "fixed" else record["views"]
+        counts.extend(len(view["weights"]) for view in selected)
+    return {"parents": len({e["parent_id"] for e in entries}),
+            "groups": len({e["group_id"] for e in entries}),
+            "min_length": min(e["length"] for e in entries),
+            "max_length": max(e["length"] for e in entries),
+            "min_chunks": min(counts), "max_chunks": max(counts), "views": views,
+            "chunk_count_basis": "available training views"}

@@ -30,8 +30,12 @@ def position_features(chunks, length):
              float(c["start"] == 0), float(c["end"] == length)] for c in chunks]
 
 
-def make_views(length, sample_id, seed=42, sizes=(128, 256, 512, 768), halo=64):
+def make_views(length, sample_id, seed=42, sizes=(128, 256, 512, 768), halo=64, mode="multiscale"):
     """Keep the deployment view first, then unique augmented partitions."""
+    if mode not in {"fixed", "multiscale"}:
+        raise ValueError("Chunk view mode must be fixed or multiscale")
+    if mode == "fixed":
+        return [{"core_size": 512, "offset": 0, "chunks": make_chunks(length, 512, halo, 0)}]
     rng = random.Random(stable_seed(seed, sample_id))
     views, seen = [], set()
     for size, offset in [(512, 0)] + [(s, rng.randrange(max(1, s // 2))) for s in sizes]:
