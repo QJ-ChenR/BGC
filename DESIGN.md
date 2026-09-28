@@ -238,8 +238,12 @@ the extrapolation hypothesis has been confirmed on real ESMC embeddings.
 - Retain short and 1,500–2,046 aa test cohorts, with full-sequence ESMC teachers.
 - Default to 512-aa cores, 64-aa context flanks, and zero offset. Training sees
   at most three chunks; test proteins above 1,536 aa have four.
-- Compare the residual Transformer, mean-vector MLP, and weighted-mean baseline;
-  treat multiscale training as a separate augmentation experiment.
+- Compare the residual Transformer, mean-vector MLP, BiLSTM, and weighted-mean
+  baseline; treat multiscale training as a separate augmentation experiment.
+  BiLSTM uses two layers (64 units per direction), packed true chunk lengths,
+  core-length-weighted pooling, and the shared zero-initialized residual head.
+  Run `python script/run_length_extrapolation.py --architectures lstm` to add the
+  three 512-residue BiLSTM runs using the existing feature cache.
 - Report raw MSE, cosine distance, neighbor preservation, length/family strata,
   group-bootstrap confidence intervals, and optional standalone SVG figures.
 - Record the protocol and available training length/chunk-count range in caches and

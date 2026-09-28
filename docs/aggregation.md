@@ -1,7 +1,7 @@
 # ESMC chunk aggregation
 
-This workflow trains a small residual Transformer to approximate a full-sequence
-ESMC residue-mean embedding from independently encoded chunks. The target use is
+This workflow trains a small residual Transformer, mean-vector MLP, or BiLSTM to
+approximate a full-sequence ESMC residue-mean embedding from independently encoded chunks. The target use is
 long NRPS/PKS proteins. ESMC is frozen throughout; only the aggregator is trained.
 All commands below run from the repository root.
 
@@ -203,7 +203,7 @@ python -m bgc_aggregation train \
   --output runs/aggregation_target
 ```
 
-Defaults:
+Defaults for the Transformer:
 
 | Component | Configuration |
 | --- | --- |
@@ -220,6 +220,18 @@ Defaults:
 | Schedule | 5% linear warmup, then cosine decay |
 | Batch / maximum epochs / patience | 64 parents / 100 / 10 |
 | Gradient clipping | 1.0 |
+
+Select `--architecture lstm` for recurrent aggregation. This is a two-layer
+bidirectional LSTM by default: `--hidden-dim 128` is the combined output width
+(64 units per direction), and `--layers 2` sets the number of recurrent layers.
+The width must be even. Inputs use the same normalization and projection as the
+Transformer. True chunk lengths are packed to exclude padding from forward and
+backward recurrence; every output is pooled by core length. Inter-layer dropout
+uses `--dropout` (disabled inside a one-layer LSTM). The readout, zero-initialized
+residual head, loss, and training settings are shared with the other methods.
+LSTM recurrence uses the supplied N-to-C chunk order and no explicit position
+features. `--heads`, `--feedforward-dim`, and `--no-positions` affect only the
+Transformer. Existing Transformer/MLP checkpoint formats remain supported.
 
 The aggregator trains in FP32; at this size mixed precision is unnecessary.
 Padding is masked in attention and pooling. The model has no fixed chunk-count
@@ -279,6 +291,11 @@ python -m bgc_aggregation train \
 python -m bgc_aggregation train \
   --cache data/embeddings/esmc600_aggregation \
   --scope target --sources both --output runs/target_with_crops
+
+# Bidirectional LSTM control, using all ordered chunk vectors.
+python -m bgc_aggregation train \
+  --cache data/embeddings/esmc600_aggregation \
+  --architecture lstm --output runs/target_lstm
 
 # Mean-vector MLP control, using the same residual output convention.
 python -m bgc_aggregation train \

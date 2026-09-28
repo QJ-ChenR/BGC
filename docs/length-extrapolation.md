@@ -114,7 +114,7 @@ python script/run_length_extrapolation.py \
   --prefix length1500
 ```
 
-The script runs Transformer and MLP training sequentially for seeds 42, 43, and
+By default, the script runs Transformer and MLP training sequentially for seeds 42, 43, and
 44, using fixed views, native target proteins, 100 maximum epochs, batch size 64,
 learning rate 1e-4, and patience 10. After all six training calls succeed, it
 evaluates all six best checkpoints on the test split, with 2,000 bootstrap draws,
@@ -143,6 +143,66 @@ Both invocations must use the same cache and prefix when overriding defaults.
 requirement. The training environment is taken from the Python interpreter used
 to launch the script. The explicit commands below remain available for individual
 runs and custom experiments.
+
+## Add the 512-residue BiLSTM comparison
+
+To add only the LSTM experiments to the existing no-MMseqs2 runs, use the same
+server environment and completed feature cache:
+
+```bash
+python script/run_length_extrapolation.py --architectures lstm
+```
+
+This trains seeds 42, 43, and 44, then evaluates their best checkpoints after all
+three training calls succeed. No dataset preparation or ESMC extraction is needed.
+The script uses `data/embeddings/length1500_no_mmseqs`, fixed 512-residue cores,
+and the cache's existing halo, groups, splits, and full-sequence teachers. Training
+and validation remain below 1,500 aa. ESMC stays frozen, and optimizer, loss, batch
+size, epoch limit, early stopping, and bootstrap settings match the earlier runs.
+
+The CLI name `lstm` denotes a **bidirectional LSTM**. The default model projects
+each chunk to 128 dimensions, applies two stacked BiLSTM layers with 64 hidden
+units per direction, and pools their 128-dimensional outputs using core-length
+weights. Inter-layer dropout is 0.1. Padding is excluded from both directions by
+packing the true chunk lengths. The pooled output uses the same LayerNorm,
+zero-initialized output projection, and residual addition to the weighted chunk
+mean as the other models. No explicit position features are used; checkpoints
+record `architecture=lstm` and `use_positions=false`. This adapts recurrent
+aggregation for reconstruction; it does not reproduce RoBERT's classification head.
+
+Outputs follow the existing naming convention:
+
+```text
+runs/length1500_no_mmseqs_lstm_s42/{run.json,history.json,best.pt,last.pt}
+results/length1500_no_mmseqs_lstm_s42/{metrics.json,length_summary.tsv,per_sample.tsv}
+results/length1500_no_mmseqs_lstm_s42/{length_error.svg,length_gain.svg}
+logs/length1500_no_mmseqs_lstm_s42.log
+logs/length1500_no_mmseqs_lstm_s42_evaluation.log
+```
+
+The same files are produced for seeds 43 and 44. Existing Transformer/MLP run
+folders are not selected or evaluated by this command. Rerun the same command to
+resume matching LSTM checkpoints. For separate stages:
+
+```bash
+python script/run_length_extrapolation.py --architectures lstm --stage train
+python script/run_length_extrapolation.py --architectures lstm --stage evaluate
+```
+
+Use `--cache` and `--prefix` together if the earlier experiment used different
+paths. The default invocation without `--architectures` keeps the original
+Transformer/MLP pair; select all three explicitly with
+`--architectures transformer mlp lstm`. Only selected methods are checked, resumed,
+and evaluated. The `--no-plots` and `--device` options work for every selection.
+
+Compare the three methods on the same short, long, and four-chunk cohorts using
+raw MSE, cosine distance, neighborhood retention, and group-bootstrap intervals.
+Each report's `evidence` still compares its model with the weighted mean; it is
+not a pairwise significance test between LSTM, MLP, and Transformer. Record all
+three seeds and inspect validation histories and parameter counts. Equal training
+settings do not imply equal parameter counts or optimal learning rates. Choices
+made after viewing the existing long-test results are exploratory; do not use
+those test scores for further hyperparameter selection.
 
 ## Train the model and control
 
@@ -191,7 +251,7 @@ python -m bgc_aggregation evaluate \
   --plots --output results/length1500_transformer_s42
 ```
 
-Repeat for the MLP and other predeclared training seeds. `--split validation` is
+Repeat for the MLP, BiLSTM, and other predeclared training seeds. `--split validation` is
 available for development and contains only short proteins. Avoid repeatedly
 selecting changes from long-test performance. Evaluation calls the aggregator on
 all held-out lengths; `embed` is not an evaluation substitute because it uses

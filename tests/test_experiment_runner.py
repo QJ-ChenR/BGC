@@ -43,7 +43,7 @@ class ExperimentRunnerTests(unittest.TestCase):
                     'initial_checkpoint': None, 'training': {**runner.TRAINING, 'seed': seed},
                     'model': {'embedding_dim': 1152, 'architecture': architecture,
                               'hidden_dim': 128, 'num_layers': 2, 'num_heads': 4,
-                              'feedforward_dim': 512, 'dropout': 0.1, 'use_positions': True}}
+                              'feedforward_dim': 512, 'dropout': 0.1, 'use_positions': architecture != 'lstm'}}
         (directory / 'run.json').write_text(json.dumps(metadata))
         for name in ('best.pt', 'last.pt'):
             (directory / name).touch()
@@ -68,6 +68,43 @@ class ExperimentRunnerTests(unittest.TestCase):
             self.assertEqual(evaluation.split, 'test')
             self.assertEqual(evaluation.bootstrap_replicates, 2000)
             self.assertFalse(evaluation.plots)
+
+    def test_lstm_only_runs_three_seeds_without_inspecting_other_runs(self):
+        unrelated = self.root / 'runs/length1500_no_mmseqs_mlp_s42'
+        unrelated.mkdir(parents=True)
+        (unrelated / 'best.pt').touch()  # An incomplete unrelated run is irrelevant.
+        with patch.object(runner, 'run_logged') as logged:
+            runner.run(self.args('--architectures', 'lstm'))
+        commands = [call.args[0] for call in logged.call_args_list]
+        self.assertEqual([cmd[4] for cmd in commands], ['train'] * 3 + ['evaluate'] * 3)
+        parsed = [cli_parser().parse_args(cmd[4:]) for cmd in commands]
+        self.assertEqual([(a.architecture, a.seed) for a in parsed[:3]],
+                         [('lstm', 42), ('lstm', 43), ('lstm', 44)])
+        for training, evaluation in zip(parsed[:3], parsed[3:]):
+            self.assertEqual(training.views, 'fixed')
+            self.assertEqual(training.cache, self.cache_path)
+            self.assertEqual(evaluation.checkpoint, training.output / 'best.pt')
+            self.assertIn('_lstm_', str(evaluation.output))
+        self.assertTrue(all('_lstm_' in call.args[1].name for call in logged.call_args_list))
+
+    def test_lstm_selection_resumes_matching_checkpoints(self):
+        directory = self.create_run('lstm', 42)
+        with patch.object(runner, 'run_logged') as logged:
+            runner.run(self.args('--architectures', 'lstm', '--stage', 'train'))
+        parsed = [cli_parser().parse_args(call.args[0][4:]) for call in logged.call_args_list]
+        self.assertEqual(len(parsed), 3)
+        self.assertEqual(parsed[0].resume, directory / 'last.pt')
+        self.assertTrue(all(args.resume is None for args in parsed[1:]))
+
+    def test_all_architectures_and_duplicate_selection(self):
+        with patch.object(runner, 'run_logged') as logged:
+            runner.run(self.args('--architectures', 'transformer', 'mlp', 'lstm'))
+        phases = [call.args[0][4] for call in logged.call_args_list]
+        self.assertEqual(phases, ['train'] * 9 + ['evaluate'] * 9)
+        with patch.object(runner, 'run_logged') as logged:
+            with self.assertRaisesRegex(ValueError, 'only once'):
+                runner.run(self.args('--architectures', 'lstm', 'lstm'))
+            logged.assert_not_called()
 
     def test_failed_training_prevents_remaining_training_and_evaluation(self):
         error = subprocess.CalledProcessError(7, ['train'])
@@ -104,7 +141,7 @@ class ExperimentRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'No matching trained run'):
                 runner.run(self.args('--stage', 'evaluate'))
             logged.assert_not_called()
-            for architecture in runner.ARCHITECTURES:
+            for architecture in runner.DEFAULT_ARCHITECTURES:
                 for seed in runner.SEEDS:
                     self.create_run(architecture, seed)
             runner.run(self.args('--stage', 'evaluate'))

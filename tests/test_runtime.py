@@ -38,7 +38,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_initial_output_equals_baseline_and_gradients_flow(self):
         batch = collate([self.features(2), self.features(5)])
-        for architecture in ("transformer", "mlp"):
+        for architecture in ("transformer", "mlp", "lstm"):
             model = self.model(architecture)
             prediction = model(**batch)
             baseline = weighted_mean(batch["embeddings"], batch["weights"])
@@ -50,6 +50,10 @@ class RuntimeTests(unittest.TestCase):
                 loss.backward()
                 optimizer.step()
             self.assertGreater(model.input_projection.weight.grad.abs().sum().item(), 0)
+            if architecture == "lstm":
+                for name, parameter in model.lstm.named_parameters():
+                    with self.subTest(parameter=name):
+                        self.assertGreater(parameter.grad.abs().sum().item(), 0)
 
     def test_padding_cannot_change_predictions_after_learning(self):
         model = self.model().eval()
@@ -62,6 +66,53 @@ class RuntimeTests(unittest.TestCase):
         padded["positions"][0, 2:] = -1e6
         padded["weights"][0, 2:] = 100
         torch.testing.assert_close(model(**padded)[0], expected, atol=1e-6, rtol=1e-5)
+
+    def test_lstm_padding_and_unsorted_lengths_match_individual_predictions(self):
+        model = self.model("lstm").eval()
+        torch.nn.init.normal_(model.output_projection.weight, std=0.1)
+        # One chunk, unseen counts, and unsorted lengths exercise both packing
+        # and restoration of the original batch order. Nonzero head exposes bugs.
+        items = [self.features(n) for n in (2, 37, 1, 4)]
+        items[0]["weights"] = torch.tensor([0.7, 0.3])
+        expected = torch.stack([model(**collate([item]))[0] for item in items])
+        batch = collate(items)
+        torch.testing.assert_close(model(**batch), expected, atol=1e-6, rtol=1e-5)
+        mask = batch["padding_mask"]
+        batch["embeddings"][mask] = 1e6
+        batch["positions"][mask] = -1e6
+        batch["weights"][mask] = 100
+        torch.testing.assert_close(model(**batch), expected, atol=1e-6, rtol=1e-5)
+        batch["positions"] = torch.randn_like(batch["positions"]) * 100
+        torch.testing.assert_close(model(**batch), expected, atol=1e-6, rtol=1e-5)
+
+    def test_lstm_responds_to_chunk_order_with_the_same_weighted_mean(self):
+        model = self.model("lstm").eval()
+        torch.nn.init.normal_(model.output_projection.weight, std=0.1)
+        features = self.features(5)
+        order = torch.tensor([2, 0, 4, 1, 3])
+        permuted = {**features, **{key: features[key][order]
+                                  for key in ("embeddings", "positions", "weights")}}
+        original, shuffled = collate([features]), collate([permuted])
+        torch.testing.assert_close(weighted_mean(original["embeddings"], original["weights"]),
+                                   weighted_mean(shuffled["embeddings"], shuffled["weights"]))
+        self.assertGreater((model(**original) - model(**shuffled)).abs().max().item(), 1e-5)
+
+    def test_lstm_configuration_and_invalid_sequence_masks(self):
+        with self.assertRaisesRegex(ValueError, "even"):
+            self_config = ModelConfig(architecture="lstm", hidden_dim=7, num_heads=1)
+            ChunkAggregator(self_config)
+        # LSTM has no attention-head divisibility requirement. Single-layer
+        # LSTMs must not receive PyTorch's inter-layer dropout argument.
+        model = ChunkAggregator(ModelConfig(architecture="lstm", embedding_dim=8,
+                                            hidden_dim=6, num_layers=1, dropout=0.1))
+        self.assertEqual(model.lstm.hidden_size, 3)
+        self.assertEqual(model.lstm.dropout, 0.0)
+        self.assertFalse(model.specification()["use_positions"])
+        for mask in ([False, True, False], [True, True, True]):
+            batch = collate([self.features(3)])
+            batch["padding_mask"][0] = torch.tensor(mask)
+            with self.assertRaisesRegex(ValueError, "nonempty sequences with right padding"):
+                model(**batch)
 
     def test_context_pooling_has_no_overlap_double_count(self):
         class FakeEncoder:
@@ -116,9 +167,9 @@ class RuntimeTests(unittest.TestCase):
         write_json(directory / "cache.json", metadata)
         return metadata
 
-    def training_args(self, cache, output):
+    def training_args(self, cache, output, architecture="transformer"):
         return build_parser().parse_args(["train", "--cache", str(cache), "--output", str(output), "--device", "cpu",
-                                         "--epochs", "3", "--batch-size", "5", "--hidden-dim", "16", "--heads", "4",
+                                         "--architecture", architecture, "--epochs", "3", "--batch-size", "5", "--hidden-dim", "16", "--heads", "4",
                                          "--feedforward-dim", "32", "--dropout", "0.1", "--learning-rate", "0.002"])
 
     def test_parent_balance_and_training_only_statistics(self):
@@ -309,6 +360,54 @@ class RuntimeTests(unittest.TestCase):
             train(augmented_args)
             augmented_checkpoint = torch.load(root / "multiscale/last.pt", weights_only=True)
             self.assertEqual(augmented_checkpoint["training_inputs"]["max_chunks"], 12)
+
+    def test_lstm_length_training_resume_checkpoint_and_evaluation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            self.make_length_cache(cache)
+            train(self.training_args(cache, root / "full", "lstm"))
+            args = self.training_args(cache, root / "resumed", "lstm")
+
+            class Interrupted(Exception):
+                pass
+
+            def interrupt(path, value):
+                save_tensor_file(path, value)
+                if Path(path).name == "last.pt" and value["epoch"] == 1:
+                    raise Interrupted()
+
+            with patch("bgc_aggregation.train.save_tensor_file", side_effect=interrupt):
+                with self.assertRaises(Interrupted):
+                    train(args)
+            args.resume = root / "resumed/last.pt"
+            args.architecture = "transformer"  # Saved model/config must win.
+            args.views = "multiscale"
+            train(args)
+            full = torch.load(root / "full/last.pt", weights_only=True)
+            resumed = torch.load(args.resume, weights_only=True)
+            self.assertEqual(resumed["model_config"]["architecture"], "lstm")
+            self.assertFalse(resumed["model_config"]["use_positions"])
+            self.assertEqual(resumed["training_config"]["views"], "fixed")
+            self.assertEqual(resumed["training_config"]["sources"], "native")
+            self.assertEqual(resumed["training_inputs"]["max_chunks"], 3)
+            self.assertLess(resumed["validation_inputs"]["max_length"], 1500)
+            for key in full["model_state"]:
+                torch.testing.assert_close(full["model_state"][key], resumed["model_state"][key], atol=0, rtol=0)
+            self.assertEqual(full["history"], resumed["history"])
+            run = read_json(root / "resumed/run.json")
+            self.assertEqual(run["model"], resumed["model_config"])
+            model, saved = load_checkpoint(args.resume, load_cache(cache))
+            self.assertEqual(model.specification(), saved["model_config"])
+            evaluation = build_parser().parse_args([
+                "evaluate", "--cache", str(cache), "--checkpoint", str(root / "resumed/best.pt"),
+                "--output", str(root / "report"), "--bootstrap-replicates", "50", "--device", "cpu"])
+            evaluate(evaluation)
+            report = read_json(root / "report/metrics.json")["length_extrapolation"]
+            self.assertEqual(report["cohorts"]["long"]["overall"]["proteins"], 3)
+            self.assertEqual(report["cohorts"]["long_beyond_chunk_range"]["overall"]["proteins"], 2)
+            self.assertTrue((root / "report/length_summary.tsv").is_file())
+            self.assertTrue((root / "report/per_sample.tsv").is_file())
 
     def test_length_training_rejects_leakage_pretraining_and_missing_views(self):
         with tempfile.TemporaryDirectory() as temporary:

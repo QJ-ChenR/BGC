@@ -3,7 +3,7 @@
 
 Usage: python script/run_length_extrapolation.py
 Uses the active Python environment. Relative paths are resolved from the project
-root. All six training runs must succeed before any test evaluation starts.
+root. All selected training runs must succeed before any test evaluation starts.
 Matching existing runs resume from last.pt; logs append across restarts.
 """
 
@@ -18,7 +18,8 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ARCHITECTURES = ("transformer", "mlp")
+ARCHITECTURES = ("transformer", "mlp", "lstm")
+DEFAULT_ARCHITECTURES = ("transformer", "mlp")
 SEEDS = (42, 43, 44)
 TRAINING = {"scope": "target", "sources": "native", "views": "fixed",
             "epochs": 100, "batch_size": 64, "learning_rate": 1e-4, "patience": 10,
@@ -33,6 +34,8 @@ def build_parser():
     parser.add_argument("--cache", type=Path, default=Path("data/embeddings/length1500_no_mmseqs"))
     parser.add_argument("--prefix", default="length1500_no_mmseqs",
                         help="Filename prefix for runs/, results/, and logs/")
+    parser.add_argument("--architectures", nargs="+", choices=ARCHITECTURES, default=DEFAULT_ARCHITECTURES,
+                        help="Methods to run (default: transformer mlp). Use lstm to add only the BiLSTM experiments")
     parser.add_argument("--device", default="cuda", help="For example cuda, cuda:0, or cpu")
     parser.add_argument("--stage", choices=("all", "train", "evaluate"), default="all",
                         help="Use train then evaluate separately to inspect short validation results first")
@@ -57,7 +60,7 @@ def matching_run(directory, cache, architecture, seed):
     expected_model = {"architecture": architecture, "embedding_dim": cache["encoder"]["embedding_dim"],
                       "hidden_dim": MODEL_OPTIONS["hidden_dim"], "num_layers": MODEL_OPTIONS["layers"],
                       "num_heads": MODEL_OPTIONS["heads"], "feedforward_dim": MODEL_OPTIONS["feedforward_dim"],
-                      "dropout": MODEL_OPTIONS["dropout"], "use_positions": True}
+                      "dropout": MODEL_OPTIONS["dropout"], "use_positions": architecture != "lstm"}
     if (metadata.get("cache_id") != cache["cache_id"]
             or metadata.get("experiment") != cache["experiment"]
             or metadata.get("model") != expected_model
@@ -95,6 +98,8 @@ def run_logged(command, log_path):
 
 
 def run(args):
+    if len(args.architectures) != len(set(args.architectures)):
+        raise ValueError("Specify each architecture only once in --architectures")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.prefix):
         raise ValueError("--prefix must be a filename prefix using letters, numbers, '.', '_', or '-'")
     cache_path = args.cache if args.cache.is_absolute() else PROJECT_ROOT / args.cache
@@ -111,7 +116,7 @@ def run(args):
 
     jobs = []
     # Check every destination before starting a potentially long series of runs.
-    for architecture in ARCHITECTURES:
+    for architecture in args.architectures:
         for seed in SEEDS:
             name = f"{args.prefix}_{architecture}_s{seed}"
             directory = PROJECT_ROOT / "runs" / name
