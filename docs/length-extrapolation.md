@@ -6,6 +6,11 @@ than 1,500 residues still improves reconstruction on held-out proteins of
 The experiment measures evidence for or against this limited extrapolation; it
 does not assume that extrapolation succeeds.
 
+For the supplied general-protein TSV pools, use the separate
+[general-protein protocol](general-length-extrapolation.md), which retains the
+complete long-test file and isolates species only within the short pool. The
+BGC isolation rules below continue to apply to this original experiment.
+
 Run commands from the repository root. Use the server environment described in
 [the aggregation workflow](aggregation.md). Preparation requires only Python's
 standard library; feature extraction requires ESMC; training and evaluation

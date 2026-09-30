@@ -377,3 +377,12 @@ models or independently normalized coordinate systems in one retrieval index.
 - [Pinned ESMC model dimensions and weight names](https://github.com/evolutionaryscale/esm/blob/v3.2.1/esm/pretrained.py)
 - [Pinned attention implementation](https://github.com/evolutionaryscale/esm/blob/v3.2.1/esm/layers/attention.py)
 - [PyTorch 2.11 SDPA](https://docs.pytorch.org/docs/2.11/generated/torch.nn.functional.scaled_dot_product_attention.html)
+
+## General-protein TSV workflow
+
+For general proteins, use [the general training workflow](general-length-extrapolation.md)
+and `prepare-general`. Its short splits isolate species; its fixed long test may
+share species with training. The supplied TSV taxonomy column is not an NRPS/PKS
+family label. This separate protocol reuses the same model and loss, validates on
+all general short proteins, and preserves the original BGC/group isolation rules
+for the workflow above. No MMseqs2 step is required by the general workflow.

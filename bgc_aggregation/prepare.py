@@ -23,6 +23,8 @@ def classify(annotation):
     """Use this CDS's rule hits, never a whole-BGC label or product-name guess."""
     rules = sorted(set(re.findall(r"(?:^|\|)\s*biosynthetic \(rule-based-clusters\) ([^:|\s]+):",
                                  annotation.get("gene_functions", ""))))
+    # A protein with both rule types is HYBRID; other PKS classes stay separate
+    # because the target task focuses on NRPS and modular PKS candidates.
     nrps, pks = bool(NRPS_RULES.intersection(rules)), bool(PKS_RULES.intersection(rules))
     family = "HYBRID" if nrps and pks else "NRPS" if nrps else "PKS" if pks else "OTHER"
     if family == "OTHER" and OTHER_PKS_RULES.intersection(rules):
@@ -32,9 +34,11 @@ def classify(annotation):
 
 class UnionFind:
     def __init__(self, identifiers):
+        # Start with one component per protein; every grouping rule adds links.
         self.parent = {key: key for key in identifiers}
 
     def find(self, key):
+        # Compress paths so repeated component lookups remain inexpensive.
         while key != self.parent[key]:
             self.parent[key] = self.parent[self.parent[key]]
             key = self.parent[key]
@@ -43,6 +47,7 @@ class UnionFind:
     def union(self, a, b):
         a, b = self.find(a), self.find(b)
         if a != b:
+            # A deterministic representative makes the result independent of link order.
             self.parent[max(a, b)] = min(a, b)
 
 
@@ -52,6 +57,8 @@ def split_parents(parents, cluster_path=None, seed=42, fractions=(0.8, 0.1, 0.1)
         raise ValueError("Three positive split fractions must sum to one")
     by_id = {p["parent_id"]: p for p in parents}
     union = UnionFind(by_id)
+    # Merge BGC and exact-sequence links transitively before assigning any split.
+    # For example, a duplicate shared by two BGCs keeps both BGCs together.
     previous = {}
     for parent in parents:
         identifier = parent["parent_id"]
@@ -59,6 +66,8 @@ def split_parents(parents, cluster_path=None, seed=42, fractions=(0.8, 0.1, 0.1)
             if key in previous:
                 union.union(identifier, previous[key])
             previous[key] = identifier
+    # Optional external homology clusters add links to the same components;
+    # they do not replace the BGC or exact-duplicate constraints.
     if cluster_path:
         members = {}
         with Path(cluster_path).open(newline="") as handle:
@@ -74,6 +83,7 @@ def split_parents(parents, cluster_path=None, seed=42, fractions=(0.8, 0.1, 0.1)
                 union.union(representative, member)
         if set(members) != set(by_id):
             raise ValueError("Homology TSV must cover every input protein, including singleton clusters")
+    # Connected components are indivisible split units, not individual proteins.
     components = defaultdict(list)
     for identifier in sorted(by_id):
         components[union.find(identifier)].append(identifier)
@@ -81,12 +91,14 @@ def split_parents(parents, cluster_path=None, seed=42, fractions=(0.8, 0.1, 0.1)
         raise ValueError("At least three independent groups are required for train/validation/test splits")
     groups = list(components.values())
     random.Random(seed).shuffle(groups)
+    # Assign large components first, with seed-controlled ordering for size ties.
     groups.sort(key=len, reverse=True)
     names = ("train", "validation", "test")
     targets = [len(parents) * f for f in fractions]
     counts = [0, 0, 0]
     for index, group in enumerate(groups):
         empty = [i for i, count in enumerate(counts) if not count]
+        # Ensure each split receives a component even for small input datasets.
         candidates = empty if len(groups) - index == len(empty) else range(3)
         # Minimize the increase in normalized squared allocation error.
         chosen = min(candidates, key=lambda i: ((counts[i] + len(group) - targets[i]) ** 2
@@ -101,10 +113,13 @@ def split_parents(parents, cluster_path=None, seed=42, fractions=(0.8, 0.1, 0.1)
 def crop_intervals(length, count, seed):
     if count < 0:
         raise ValueError("Crops per parent must be nonnegative")
+    # Standard training can use teacher-sized fragments from very long parents.
+    # These are isolated-fragment teachers, not full-length teachers for the parent.
     rng, intervals = random.Random(seed), []
     for index in range(count):
         size = (1024, 1536, MAX_RESIDUES, MAX_RESIDUES)[index % 4]
         size = min(size, length)
+        # Include terminal regions first, then sample interior starts reproducibly.
         start = 0 if index == 0 else length - size if index == 1 else rng.randint(0, length - size)
         interval = (start, start + size)
         if interval not in intervals:
@@ -115,6 +130,7 @@ def crop_intervals(length, count, seed):
 def prepare(args):
     experiment = experiment_config(args)
     length_experiment = experiment["protocol"] == LENGTH_PROTOCOL
+    # FASTA and annotation identifiers must agree before labels or splits are built.
     sequences, annotations = read_fasta(args.fasta), read_table(args.annotations)
     if set(sequences) - set(annotations):
         raise ValueError("Every FASTA protein must have an annotation row")
@@ -135,11 +151,15 @@ def prepare(args):
         parents.append({"parent_id": identifier, "bgc_id": bgc, "family": family,
                         "rules": rules, "label_source": "override" if identifier in labels else "rule_hits",
                         "sequence": sequence, "length": len(sequence)})
+    # Group the complete parent set before filtering by length or generating crops.
+    # Otherwise fragments or linked proteins could leak into different splits.
     split_parents(parents, args.clusters, args.seed)
     samples = []
     for parent in parents:
         if length_experiment:
             parent["experiment_role"] = experiment_role(parent, args.scope, experiment["length_cutoff"])
+            # Keep excluded parents in the audit, but never generate teacher samples
+            # from long training/validation proteins in the length experiment.
             if parent["experiment_role"].startswith("excluded_"):
                 continue
         is_target = parent["family"] in TARGET_FAMILIES
@@ -152,6 +172,7 @@ def prepare(args):
             source = "crop"
         else:
             continue
+        # Every crop and chunk view inherits the original parent group and split.
         for start, end in intervals:
             sample_id = digest([parent["parent_id"], start, end, source])[:24]
             samples.append({"sample_id": sample_id, "parent_id": parent["parent_id"],
@@ -169,6 +190,8 @@ def prepare(args):
     if output.exists() and any(output.iterdir()):
         raise ValueError(f"Preparation requires a new or empty directory: {output}")
     output.mkdir(parents=True, exist_ok=True)
+    # Parents preserve the selection audit; samples describe exactly what ESMC
+    # will encode. Both files are fingerprinted for cache compatibility checks.
     write_jsonl(output / "parents.jsonl", parents)
     write_jsonl(output / "samples.jsonl", samples)
     with (output / "selection.tsv").open("w", newline="") as handle:

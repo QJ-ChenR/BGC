@@ -47,7 +47,7 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def matching_run(directory, cache, architecture, seed):
+def matching_run(directory, cache, architecture, seed, training=None):
     """Do not resume a different experiment under a familiar directory name."""
     if not directory.exists() or not any(directory.iterdir()):
         return False
@@ -56,7 +56,7 @@ def matching_run(directory, cache, architecture, seed):
         raise ValueError(f"Incomplete run directory: {directory}. Preserve it and use a new --prefix, "
                          "or restore run.json, best.pt, and last.pt before resuming.")
     metadata = read_json(directory / "run.json")
-    expected = {**TRAINING, "seed": seed}
+    expected = {**(TRAINING if training is None else training), "seed": seed}
     expected_model = {"architecture": architecture, "embedding_dim": cache["encoder"]["embedding_dim"],
                       "hidden_dim": MODEL_OPTIONS["hidden_dim"], "num_layers": MODEL_OPTIONS["layers"],
                       "num_heads": MODEL_OPTIONS["heads"], "feedforward_dim": MODEL_OPTIONS["feedforward_dim"],
@@ -97,7 +97,8 @@ def run_logged(command, log_path):
             raise subprocess.CalledProcessError(status, command)
 
 
-def run(args):
+def run(args, *, protocol="length-extrapolation", training=None, seeds=SEEDS):
+    training = TRAINING if training is None else training
     if len(args.architectures) != len(set(args.architectures)):
         raise ValueError("Specify each architecture only once in --architectures")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.prefix):
@@ -107,8 +108,8 @@ def run(args):
     cache = read_json(cache_path / "cache.json")
     if not cache.get("complete"):
         raise ValueError("The feature cache is incomplete. Finish step 4 before running this script.")
-    if cache.get("experiment", {}).get("protocol") != "length-extrapolation":
-        raise ValueError("Use a cache prepared with --protocol length-extrapolation")
+    if cache.get("experiment", {}).get("protocol") != protocol:
+        raise ValueError(f"Use a cache prepared for {protocol}")
     if args.stage != "train" and not args.no_plots:
         import importlib.util
         if importlib.util.find_spec("matplotlib") is None:
@@ -117,10 +118,10 @@ def run(args):
     jobs = []
     # Check every destination before starting a potentially long series of runs.
     for architecture in args.architectures:
-        for seed in SEEDS:
+        for seed in seeds:
             name = f"{args.prefix}_{architecture}_s{seed}"
             directory = PROJECT_ROOT / "runs" / name
-            resume = matching_run(directory, cache, architecture, seed)
+            resume = matching_run(directory, cache, architecture, seed, training)
             if args.stage == "evaluate" and not resume:
                 raise ValueError(f"No matching trained run: {directory}. Run --stage train first.")
             jobs.append((architecture, seed, name, directory, resume))
@@ -134,7 +135,7 @@ def run(args):
         for architecture, seed, name, directory, resume in jobs:
             command = [*base, "train", *common, "--architecture", architecture,
                        "--seed", str(seed), "--output", str(directory)]
-            for key, value in {**TRAINING, **MODEL_OPTIONS}.items():
+            for key, value in {**training, **MODEL_OPTIONS}.items():
                 command.extend(["--" + key.replace("_", "-"), str(value)])
             if resume:
                 command.extend(["--resume", str(directory / "last.pt")])
@@ -142,9 +143,12 @@ def run(args):
     if args.stage in {"all", "evaluate"}:
         for _, _, name, directory, _ in jobs:
             command = [*base, "evaluate", *common, "--checkpoint", str(directory / "best.pt"),
-                       "--split", "test", "--scope", "target", "--sources", "native",
-                       "--bootstrap-replicates", "2000", "--bootstrap-seed", "42",
+                       "--split", "test", "--scope", training["scope"], "--sources", "native",
+                       "--bootstrap-replicates", str(getattr(args, "bootstrap_replicates", 2000)),
+                       "--bootstrap-seed", str(getattr(args, "bootstrap_seed", 42)),
                        "--output", str(PROJECT_ROOT / "results" / name)]
+            if getattr(args, "skip_neighbors", False):
+                command.append("--skip-neighbors")
             if not args.no_plots:
                 command.append("--plots")
             run_logged(command, logs / f"{name}_evaluation.log")

@@ -42,6 +42,7 @@ NO_CORE_FIELDS = [
 
 def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
     """Extract all core CDS in filename order; gene_index is the 1-based CDS index within each file."""
+    # Stable file order keeps output order and downstream audits reproducible.
     gbk_files = sorted(input_dir.glob("*.gbk"))
     if not gbk_files:
         raise ValueError(f"Input directory does not exist or contains no .gbk files: {input_dir}")
@@ -63,6 +64,8 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
 
         for gbk_file in gbk_files:
             bgc_id = gbk_file.stem
+            # Count every CDS in the file, including skipped ones, so filtering
+            # does not change the identifiers of retained genes.
             gene_index = 0
             file_core_count = 0
             record_ids = []
@@ -78,6 +81,8 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
                         organisms.add(record.annotations["organism"])
                     if record.description:
                         descriptions.add(record.description)
+                    # Collect file-level labels for the review table; they do not
+                    # determine whether an individual CDS is a core gene.
                     for feature in record.features:
                         if (feature.type == "subregion"
                                 and "mibig" in feature.qualifiers.get("aStool", [])):
@@ -90,6 +95,7 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
                         kind_counts.update(kinds)
                         if not kinds:
                             unlabeled_cds += 1
+                        # Exact membership excludes the separate biosynthetic-additional label.
                         if "biosynthetic" not in qualifiers.get("gene_kind", []):
                             continue
                         if feature.location is None:
@@ -119,6 +125,8 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
                             # Do not infer translations, to avoid errors from incomplete CDS or special translation rules.
                             counts["missing_translation"] += 1
 
+                        # The TSV joins FASTA records to biological annotations and
+                        # preserves both display coordinates and the full CDS location.
                         writer.writerow({
                             "sequence_id": sequence_id,
                             "bgc_id": bgc_id,
@@ -143,6 +151,8 @@ def extract_core_genes(input_dir: Path, output_dir: Path) -> dict[str, int]:
             if file_core_count:
                 counts["files_with_core"] += 1
             else:
+                # Absence of a core label is an annotation-review case, not proof
+                # that the BGC lacks biosynthetic genes.
                 no_core_writer.writerow({
                     "bgc_id": bgc_id,
                     "source_file": gbk_file.name,

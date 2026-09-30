@@ -49,6 +49,15 @@ def build_parser():
     prepare.add_argument("--halo", type=nonnegative, default=64)
     prepare.add_argument("--seed", type=nonnegative, default=42)
 
+    general = commands.add_parser("prepare-general", help="Prepare species-grouped short proteins and a fixed long test")
+    general.add_argument("--short-tsv", type=Path,
+                         default=Path("data/raw/general/protein_sequences_500_1499aa_50000.tsv"))
+    general.add_argument("--long-tsv", type=Path,
+                         default=Path("data/raw/general/protein_sequences_1500_2000aa.tsv"))
+    general.add_argument("--output", type=Path, required=True)
+    general.add_argument("--halo", type=nonnegative, default=64)
+    general.add_argument("--seed", type=nonnegative, default=42)
+
     cache = commands.add_parser("cache", help="Extract frozen ESMC teachers and multi-view chunk features")
     cache.add_argument("--dataset", type=Path, required=True)
     cache.add_argument("--output", type=Path, required=True)
@@ -70,6 +79,8 @@ def build_parser():
     train.add_argument("--no-positions", action="store_true",
                        help="Disable explicit position features in the Transformer; MLP and LSTM do not use them")
     train.add_argument("--epochs", type=positive, default=100)
+    train.add_argument("--max-steps", type=positive,
+                       help="Optional optimizer-update cap; cosine schedule uses the capped budget")
     train.add_argument("--batch-size", type=positive, default=64)
     train.add_argument("--learning-rate", type=float, default=1e-4)
     train.add_argument("--weight-decay", type=float, default=0.01)
@@ -95,6 +106,8 @@ def build_parser():
     evaluate.add_argument("--device", default="cuda")
     evaluate.add_argument("--batch-size", type=positive, default=64)
     evaluate.add_argument("--neighbors", type=positive, default=10)
+    evaluate.add_argument("--skip-neighbors", action="store_true",
+                          help="Omit quadratic neighbor search; retain all reconstruction metrics")
     evaluate.add_argument("--all-views", action="store_true", help="Also evaluate alternate chunk partitions")
 
     evaluate.add_argument("--bootstrap-replicates", type=positive, default=2000,
@@ -152,7 +165,8 @@ def check_environment(args):
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    targets = {"prepare": ("prepare", "prepare"), "cache": ("cache", "extract_cache"),
+    targets = {"prepare-general": ("general_prepare", "prepare_general"),
+               "prepare": ("prepare", "prepare"), "cache": ("cache", "extract_cache"),
                "train": ("train", "train"), "evaluate": ("evaluate", "evaluate"), "embed": ("embed", "embed")}
     try:
         if args.command == "check-env":

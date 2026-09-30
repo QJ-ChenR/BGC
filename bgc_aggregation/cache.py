@@ -7,11 +7,12 @@ import torch
 from .chunking import position_features
 from .common import (SCHEMA_VERSION, digest, file_digest, read_json, read_jsonl,
                      verify_dataset, write_json)
-from .protocol import is_length_experiment, validate_length_entries
+from .protocol import GENERAL_FIELDS, is_length_experiment, validate_length_entries
 
 
 def save_tensor_file(path, value):
     path = Path(path)
+    # Atomic replacement prevents interrupted writes from looking like complete shards.
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(value, temporary)
     temporary.replace(path)
@@ -19,13 +20,18 @@ def save_tensor_file(path, value):
 
 def encode_view(encoder, sequence, view, pooled=None):
     chunks = view["chunks"]
+    # Feed the context-expanded sequence to ESMC, translating the core interval
+    # into that local sequence so the encoder pools each original residue once.
     requests = [(sequence[c["context_start"]:c["context_end"]],
                  c["start"] - c["context_start"], c["end"] - c["context_start"])
                 for c in chunks]
     if pooled is None:
         pooled = {}
+    # Reuse identical requests across views of the same sample to save encoder work.
     missing = list(dict.fromkeys(request for request in requests if request not in pooled))
     pooled.update(zip(missing, encoder.pool(missing)))
+    # Store small per-chunk vectors, geometry, and core-length fractions rather
+    # than per-residue activations; aggregator training needs no ESMC forward pass.
     return {"embeddings": torch.stack([pooled[r] for r in requests]),
             "positions": torch.tensor(position_features(chunks, len(sequence)), dtype=torch.float32),
             "weights": torch.tensor([(c["end"] - c["start"]) / len(sequence) for c in chunks],
@@ -36,11 +42,13 @@ def encode_view(encoder, sequence, view, pooled=None):
 def extract_cache(args):
     from .encoder import ESMCEncoder
 
+    # Validate source fingerprints and split rules before expensive feature extraction.
     dataset = verify_dataset(args.dataset)
     samples = read_jsonl(Path(args.dataset) / "samples.jsonl")
     if is_length_experiment(dataset):
         validate_length_entries(samples, dataset["experiment"])
     encoder = ESMCEncoder(args.model, args.device, args.weights, args.esm_batch_size, args.token_budget)
+    # Bind every shard to this dataset, encoder identity, and chunking convention.
     contract = {"schema_version": SCHEMA_VERSION, "dataset_id": dataset["dataset_id"],
                 "encoder": encoder.identity, "halo": dataset["halo"],
                 "deployment_core_size": dataset["deployment_core_size"]}
@@ -54,12 +62,14 @@ def extract_cache(args):
         raise ValueError("Cache settings or input data changed; use a different output directory")
     if not metadata_path.exists() and any(output.iterdir()):
         raise ValueError("Cache output contains unrelated files; use an empty directory")
+    # Mark extraction incomplete until every sample has a compatible cached shard.
     write_json(metadata_path, {**contract, "cache_id": cache_id, "complete": False})
     entries = []
     for number, sample in enumerate(samples, 1):
         path = output / f'{sample["sample_id"]}.pt'
         if args.limit is not None and number > args.limit:
             break
+        # Completed shards survive interruption; a rerun resumes at the missing ones.
         if path.exists():
             cached = torch.load(path, map_location="cpu", weights_only=True)
             if cached["cache_id"] != cache_id or cached["sample_id"] != sample["sample_id"]:
@@ -67,13 +77,17 @@ def extract_cache(args):
         else:
             sequence = sample["sequence"]
             pooled = {}
+            # Encode the entire sample (a natural protein or an isolated crop)
+            # as the teacher. Separate chunk passes produce the student inputs.
             teacher = encoder.pool([(sequence, 0, len(sequence))])[0]
             views = [encode_view(encoder, sequence, view, pooled) for view in sample["views"]]
             cached = {"cache_id": cache_id, "sample_id": sample["sample_id"],
                       "teacher": teacher, "views": views}
             save_tensor_file(path, cached)
+        # Preserve split and taxonomy provenance alongside the feature-file checksum.
         entries.append({key: sample[key] for key in
                         ("sample_id", "parent_id", "bgc_id", "family", "group_id", "split", "source", "length")}
+                       | {key: sample[key] for key in GENERAL_FIELDS if key in sample}
                        | {"file": path.name, "sha256": file_digest(path), "views": len(cached["views"])})
         if number == 1 or number % 25 == 0 or number == len(samples):
             print(f"Cached {number}/{len(samples)} teacher samples", flush=True)
@@ -89,6 +103,7 @@ def load_cache(directory):
     metadata = read_json(directory / "cache.json")
     if metadata["schema_version"] != SCHEMA_VERSION or not metadata.get("complete"):
         raise ValueError("Training/evaluation requires a complete cache with a supported schema")
+    # Fail on missing/changed tensors instead of silently training on a partial cache.
     for entry in metadata["entries"]:
         path = directory / entry["file"]
         if not path.is_file() or file_digest(path) != entry["sha256"]:

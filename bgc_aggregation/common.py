@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 SCHEMA_VERSION = 1
+# Reserve two positions of the 2048-token ESMC budget for BOS and EOS.
 MAX_RESIDUES = 2046
 POSITION_DIM = 5
 LENGTH_SCALE = 512.0
@@ -14,6 +15,7 @@ TARGET_FAMILIES = {"NRPS", "PKS", "HYBRID"}
 
 
 def digest(value):
+    # Canonical key order gives equivalent metadata the same reproducibility ID.
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
@@ -26,6 +28,7 @@ def file_digest(path):
 
 
 def stable_seed(seed, key):
+    # Unlike Python hash(), this seed is stable across processes and restarts.
     return int(digest([seed, key])[:16], 16)
 
 
@@ -33,6 +36,7 @@ def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
+    # Replace only after a complete write so readers do not see partial metadata.
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n")
     temporary.replace(path)
 
@@ -62,6 +66,7 @@ def read_table(path, key="sequence_id"):
             raise ValueError(f"Missing column {key!r} in {path}")
         rows = {}
         for row in reader:
+            # Duplicate keys would silently overwrite annotations in the lookup table.
             if not row[key] or row[key] in rows:
                 raise ValueError(f"Empty or duplicate {key} in {path}: {row[key]!r}")
             rows[row[key]] = row
@@ -79,6 +84,8 @@ def read_fasta(path):
         sequence = "".join(parts).upper()
         if sequence.endswith("*"):
             sequence = sequence[:-1]
+        # Ambiguous/nonstandard residue tokens are allowed; gaps and internal stops
+        # are rejected because they break residue-based chunk coordinates.
         invalid = set(sequence) - set("ACDEFGHIKLMNPQRSTVWYXBZUO")
         if not sequence or invalid:
             raise ValueError(f"Invalid protein {identifier}: empty sequence or symbols {sorted(invalid)}")
@@ -112,6 +119,7 @@ def verify_dataset(directory):
     metadata = read_json(directory / "dataset.json")
     if metadata["schema_version"] != SCHEMA_VERSION:
         raise ValueError("Unsupported dataset schema")
+    # Refuse stale preparation files before deriving embeddings from changed inputs.
     for name, expected in metadata["files"].items():
         if file_digest(directory / name) != expected:
             raise ValueError(f"Dataset file changed after preparation: {name}")

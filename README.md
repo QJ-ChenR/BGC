@@ -9,6 +9,9 @@ local data preparation, server installation, training, evaluation, and inference
 Use the [length-extrapolation experiment](docs/length-extrapolation.md) to train on
 proteins shorter than 1,500 aa and test reconstruction on held-out 1,500–2,046 aa
 proteins, with grouped splits and confidence intervals.
+For the general-protein TSV pools, use the [general training workflow](docs/general-length-extrapolation.md):
+short proteins are split by species, the supplied long file stays in test, and all
+three architectures share the existing model/training code. No MMseqs2 is required.
 See [DESIGN.md](DESIGN.md) for the proposed architecture and research roadmap.
 
 ## Getting started

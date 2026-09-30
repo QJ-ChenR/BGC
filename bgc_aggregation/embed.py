@@ -20,11 +20,13 @@ def embed(args):
     contract = checkpoint["feature_contract"]
     encoder = ESMCEncoder(contract["encoder"]["model"], args.device, args.weights,
                           args.esm_batch_size, args.token_budget)
+    # A learned correction is specific to its ESMC coordinate space and precision.
     if encoder.identity != contract["encoder"]:
         raise ValueError("Inference encoder weights, version, or precision differ from training features")
     model = model.to(encoder.device).eval()
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
+    # Bind resumable inference shards to both the input FASTA and the exact checkpoint.
     identity = {"checkpoint_sha256": file_digest(args.checkpoint),
                 "fasta_sha256": file_digest(args.fasta), "feature_contract": contract}
     run_id = digest(identity)
@@ -42,10 +44,13 @@ def embed(args):
             if result["run_id"] != run_id or result["sequence_id"] != identifier:
                 raise ValueError(f"Incompatible inference shard: {shard}")
         else:
+            # Use the direct full-sequence embedding whenever ESMC can encode it.
+            # Aggregation is needed only for proteins exceeding the residue limit.
             if len(sequence) <= MAX_RESIDUES:
                 vector = encoder.pool([(sequence, 0, len(sequence))])[0]
                 baseline, count, method = vector, 1, "direct_esmc"
             else:
+                # Recreate the training contract's deployment partition for long proteins.
                 chunks = make_chunks(len(sequence), contract["deployment_core_size"], contract["halo"])
                 view = {"core_size": contract["deployment_core_size"], "offset": 0, "chunks": chunks}
                 features = encode_view(encoder, sequence, view)
@@ -56,12 +61,14 @@ def embed(args):
                 raise ValueError(f"Non-finite embedding for {identifier}")
             result = {"run_id": run_id, "sequence_id": identifier, "length": len(sequence),
                       "chunks": count, "method": method, "embedding": vector, "baseline": baseline}
+            # Save per protein so interrupted extraction can reuse completed work.
             save_tensor_file(shard, result)
         vectors.append(result["embedding"])
         baselines.append(result["baseline"])
         records.append({key: result[key] for key in ("sequence_id", "length", "chunks", "method")})
         if index == 1 or index % 25 == 0 or index == len(sequences):
             print(f"Embedded {index}/{len(sequences)} proteins", flush=True)
+    # Preserve raw embeddings for reconstruction and normalized copies for cosine search.
     matrix = torch.stack(vectors)
     save_tensor_file(output / "embeddings.pt", {"ids": list(sequences), "embeddings": matrix,
                      "normalized_embeddings": F.normalize(matrix, dim=-1),

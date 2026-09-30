@@ -260,3 +260,18 @@ shared domain architectures, and biological retrieval remain separate evaluation
 - Embedding sidecar metadata: model id, config hash, git commit, date.
 - src-layout package + pytest + ruff + pre-commit; notebooks for exploration
   only.
+
+## General-protein training (implemented)
+
+The general TSV workflow reuses ESMC, fixed 512-aa cores with 64-aa context,
+residual MLP/BiLSTM/Transformer models, and reconstruction loss. The separate
+`general-length-extrapolation` protocol uses species-grouped 80/10/10 short-pool
+splits and retains the supplied 1,500–2,000-aa file as a fixed test. Species
+isolation applies only within the short pool; cross-length species and homology
+overlap are allowed and reported, without MMseqs2. General short validation
+selects checkpoints; the existing BGC protocol still validates on target families.
+
+Training records optimizer-update budgets, and evaluation adds taxonomy and
+training-species overlap strata. The dedicated runner defaults to all three
+architectures and seeds 42/43/44. Cross-dataset NRPS/PKS fine-tuning remains a
+separate future transfer protocol. See [the complete workflow](docs/general-length-extrapolation.md).

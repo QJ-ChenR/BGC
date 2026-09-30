@@ -11,6 +11,7 @@ from .common import POSITION_DIM, TARGET_FAMILIES, stable_seed
 
 
 def select_entries(metadata, split, scope="target", sources="both"):
+    # Filter metadata before loading tensors; split membership was fixed at preparation.
     entries = [e for e in metadata["entries"] if e["split"] == split
                and (scope == "all" or e["family"] in TARGET_FAMILIES)
                and (sources == "both" or e["source"] == sources)]
@@ -31,6 +32,8 @@ class ParentDataset(Dataset):
             raise ValueError("Training views must be fixed or multiscale")
         self.views = views
         self.directory, self.seed, self.epoch = directory, seed, 0
+        # One dataset item represents a parent protein, not one of its many crops.
+        # This prevents long parents with more cached fragments from dominating epochs.
         groups = defaultdict(list)
         for entry in entries:
             groups[entry["parent_id"]].append(entry)
@@ -41,10 +44,13 @@ class ParentDataset(Dataset):
 
     def __getitem__(self, index):
         entries = self.parents[index]
+        # Reproduce the chosen crop/view from the epoch and parent, independent of
+        # DataLoader ordering or how many other samples have already been drawn.
         rng = random.Random(stable_seed(self.seed, [self.epoch, entries[0]["parent_id"]]))
         entry = rng.choice(entries)
         record = load_record(self.directory, entry)
-        # Half of the views use the exact deployment partition.
+        # Fixed mode always uses view zero; in multiscale mode the explicit 50%
+        # branch favors deployment, and the random branch may select it again.
         view = record["views"][0] if self.views == "fixed" or rng.random() < 0.5 else rng.choice(record["views"])
         return {**view, "teacher": record["teacher"], "entry": entry}
 
@@ -53,6 +59,8 @@ def collate(items):
     count = len(items)
     maximum = max(len(item["weights"]) for item in items)
     dimension = items[0]["embeddings"].shape[-1]
+    # Pad only the chunk axis to the longest protein in this batch.
+    # True means padding; valid chunks replace that mask value with False below.
     embeddings = torch.zeros(count, maximum, dimension)
     positions = torch.zeros(count, maximum, POSITION_DIM)
     weights = torch.zeros(count, maximum)
@@ -65,6 +73,7 @@ def collate(items):
         padding_mask[row, :length] = False
     result = {"embeddings": embeddings, "positions": positions,
               "weights": weights, "padding_mask": padding_mask}
+    # Inference uses the same batch layout but has no teacher target attached.
     if "teacher" in items[0]:
         result["teacher"] = torch.stack([item["teacher"] for item in items])
     return result
@@ -83,12 +92,16 @@ def teacher_statistics(directory, entries):
     groups = defaultdict(list)
     for entry in entries:
         groups[entry["parent_id"]].append(entry)
+    # Average moments within each parent first, then across parents. Callers pass
+    # training entries only, so normalization does not use held-out teachers.
     first, second = [], []
     for group in groups.values():
         vectors = torch.stack([load_record(directory, entry)["teacher"].double() for entry in group])
         first.append(vectors.mean(dim=0))
         second.append(vectors.square().mean(dim=0))
     mean = torch.stack(first).mean(dim=0)
+    # E[x^2] - E[x]^2 gives a per-coordinate variance; its mean is the scalar
+    # MSE normalizer. Double-precision moments reduce cancellation error.
     variance = (torch.stack(second).mean(dim=0) - mean.square()).mean().item()
     if variance <= 1e-8:
         raise ValueError("Training teacher variance is too small for meaningful reconstruction")
@@ -101,9 +114,12 @@ def input_summary(directory, entries, views, strict=False):
     for entry in entries:
         record = load_record(directory, entry)
         first = record["views"][0]
+        # View zero is the deployment partition used for validation and primary tests.
         if strict and (first["core_size"] != 512 or first["offset"] != 0
                        or len(first["weights"]) != (entry["length"] + 511) // 512):
             raise ValueError("Length-extrapolation requires a fixed 512-residue, zero-offset first view")
+        # Record the available chunk-count range, not a claim that every view
+        # was sampled before the best checkpoint was selected.
         selected = record["views"][:1] if views == "fixed" else record["views"]
         counts.extend(len(view["weights"]) for view in selected)
     return {"parents": len({e["parent_id"] for e in entries}),

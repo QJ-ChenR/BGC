@@ -26,6 +26,7 @@ def summarize_fasta(path: Path) -> dict:
     total_length = 0
     max_length = None
     longest_ids = []
+    # Stream records rather than keeping all sequences in memory for length statistics.
     with path.open(encoding="utf-8") as handle:
         for record in SeqIO.parse(handle, "fasta"):
             length = len(record.seq)
@@ -34,6 +35,7 @@ def summarize_fasta(path: Path) -> dict:
             if max_length is None or length > max_length:
                 max_length = length
                 longest_ids = [record.id]
+            # Preserve all ties so the report does not arbitrarily pick one longest gene.
             elif length == max_length:
                 longest_ids.append(record.id)
     return {
@@ -51,6 +53,7 @@ def main() -> None:
                         default=PROJECT_ROOT / "data/processed/core_genes",
                         help="Directory containing core_genes.fna and core_genes.faa")
     args = parser.parse_args()
+    # Count DNA and protein records separately because a CDS may lack a translation.
     inputs = [("CDS", "bp", args.input_dir / "core_genes.fna"),
               ("Protein", "aa", args.input_dir / "core_genes.faa")]
     for _, _, path in inputs:

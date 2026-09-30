@@ -467,6 +467,69 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "protocol differs"):
                 train(args)
 
+    def test_legacy_checkpoint_without_step_metadata_still_resumes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            self.make_length_cache(cache)
+            train(self.training_args(cache, root / "full"))
+            args = self.training_args(cache, root / "legacy")
+            class Interrupted(Exception):
+                pass
+
+            def save_legacy(path, value):
+                value = dict(value)
+                value["training_config"] = dict(value["training_config"])
+                value["training_config"].pop("max_steps")
+                value["training_config"].pop("validation_scope")
+                value.pop("global_step")
+                value.pop("planned_optimizer_steps")
+                save_tensor_file(path, value)
+                if Path(path).name == "last.pt" and value["epoch"] == 1:
+                    raise Interrupted()
+
+            with patch("bgc_aggregation.train.save_tensor_file", side_effect=save_legacy):
+                with self.assertRaises(Interrupted):
+                    train(args)
+            args.resume = args.output / "last.pt"
+            train(args)
+            full = torch.load(root / "full/last.pt", weights_only=True)
+            resumed = torch.load(args.resume, weights_only=True)
+            self.assertEqual(resumed["global_step"], 6)
+            self.assertIsNone(resumed["training_config"]["max_steps"])
+            for key in full["model_state"]:
+                torch.testing.assert_close(full["model_state"][key], resumed["model_state"][key], atol=0, rtol=0)
+
+    def test_neighbor_reuse_matches_independent_query_search(self):
+        from torch.nn import functional as F
+        from bgc_aggregation.evaluate import neighborhood_scores, summarize_neighborhood
+
+        teacher = torch.randn(131, 8)
+        tensors = {"teacher": teacher, "model": teacher + torch.randn_like(teacher) * 0.6,
+                   "baseline": teacher + torch.randn_like(teacher),
+                   "entries": [{"parent_id": str(i), "group_id": str(i // 2)} for i in range(130)]
+                              + [{"parent_id": "0", "group_id": "0"}]}
+        for center in (None, teacher.mean(0)):
+            expected = {"model": [], "baseline": []}
+            vectors = {key: value[:130] - center if center is not None else value[:130]
+                       for key, value in tensors.items() if key != "entries"}
+            for index in (0, 129):
+                candidates = [i for i in range(130) if i // 2 != index // 2]
+                def neighbors(key):
+                    scores = F.cosine_similarity(vectors[key][index].unsqueeze(0),
+                                                 vectors["teacher"][candidates], dim=-1)
+                    return {candidates[j] for j in scores.topk(5).indices.tolist()}
+                target = neighbors("teacher")
+                for key in expected:
+                    expected[key].append(len(target & neighbors(key)) / 5)
+            scores = neighborhood_scores(tensors, 5, center)
+            report = summarize_neighborhood(scores, {"0", "129"})
+            self.assertEqual(report["gallery_parents"], 130)
+            self.assertEqual(report["eligible_queries"], 2)
+            for key in expected:
+                self.assertAlmostEqual(report[key], sum(expected[key]) / 2)
+            self.assertEqual(summarize_neighborhood(scores, set())["eligible_queries"], 0)
+
     def test_neighbors_exclude_same_group_and_duplicate_parents(self):
         vectors = torch.eye(4)
         tensors = {"model": vectors, "teacher": vectors, "baseline": vectors,

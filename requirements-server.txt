@@ -3,5 +3,7 @@
 torch==2.11.0+cu130
 esm==3.2.1
 transformers==4.48.1
+# Group-bootstrap statistics for the general-protein protocol.
+numpy>=1.26,<3
 # Optional evaluate --plots output for length-extrapolation experiments.
 matplotlib>=3.8,<4

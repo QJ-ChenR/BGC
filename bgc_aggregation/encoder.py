@@ -27,6 +27,7 @@ def select_device(name):
 class ESMCEncoder:
     def __init__(self, model_name="esmc_600m", device="cuda", weights=None,
                  batch_size=2, token_budget=4096):
+        # Pin the adapter API and pooling behavior so cached embeddings stay comparable.
         if version("esm") != ESM_VERSION:
             raise ValueError(f"This adapter requires esm=={ESM_VERSION}; install requirements-server.txt")
         from esm.models.esmc import ESMC
@@ -38,14 +39,18 @@ class ESMCEncoder:
         self.device = select_device(device)
         self.batch_size, self.token_budget = batch_size, token_budget
         dimension, heads, layers, size = MODEL_SPECS[model_name]
+        # Local weights support offline servers; otherwise resolve the official checkpoint.
         if weights is None:
             weights = hf_hub_download(
                 repo_id=f"EvolutionaryScale/esmc-{size}-2024-12",
                 filename=f"data/weights/esmc_{size}_2024_12_v0.pth")
         weights = Path(weights)
+        # BF16 reduces GPU memory use; pooled vectors are converted back to float32.
         dtype = torch.bfloat16 if self.device.type == "cuda" else torch.float32
         if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
             raise ValueError("This CUDA workflow requires BF16 support")
+        # Record the actual weights, precision, and pooling convention in cache metadata.
+        # Matching only the model name would not guarantee compatible features.
         self.identity = {"model": model_name, "embedding_dim": dimension,
                          "esm_version": ESM_VERSION, "weights_sha256": file_digest(weights),
                          "precision": str(dtype), "pooling": "last_output_residue_mean_v1",
@@ -56,6 +61,7 @@ class ESMCEncoder:
                           tokenizer=get_esmc_model_tokenizers(), use_flash_attn=False)
         self.model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True))
         self.model = self.model.to(device=self.device, dtype=dtype).eval()
+        # ESMC is a frozen feature extractor; only the downstream aggregator is trained.
         self.model.requires_grad_(False)
 
     @torch.inference_mode()
@@ -64,12 +70,15 @@ class ESMCEncoder:
         for sequence, start, end in requests:
             if not 0 <= start < end <= len(sequence) <= MAX_RESIDUES:
                 raise ValueError("Invalid residue pooling interval or ESMC sequence length")
+        # Batch similar lengths together to reduce padding, then restore caller order.
         order = sorted(range(len(requests)), key=lambda i: len(requests[i][0]))
         results, cursor = [None] * len(requests), 0
         while cursor < len(order):
             selected = []
             while cursor < len(order) and len(selected) < self.batch_size:
                 candidate = order[cursor]
+                # Ascending lengths make this candidate the batch maximum. Account
+                # for BOS/EOS and padding for every sequence when enforcing the budget.
                 padded_tokens = (len(requests[candidate][0]) + 2) * (len(selected) + 1)
                 if selected and padded_tokens > self.token_budget:
                     break
@@ -87,9 +96,13 @@ class ESMCEncoder:
             output = self.model(sequence_tokens=padded)
             for row, index in enumerate(selected):
                 _, start, end = requests[index]
+                # Residue zero follows BOS, hence +1. Pool the requested interval:
+                # the whole teacher sequence or a chunk core, excluding its halo.
+                # EOS and batch padding never enter either mean.
                 vector = output.embeddings[row, start + 1:end + 1].float().mean(dim=0).cpu()
                 if not torch.isfinite(vector).all():
                     raise ValueError("ESMC produced non-finite embeddings")
                 results[index] = vector
+            # Release per-residue GPU activations before processing the next batch.
             del output
         return results
